@@ -108,8 +108,6 @@ def _format_web_results(payload: Dict[str, object]) -> str:
 
 def _export_chat_session(elog: EventLog, format: str = "markdown") -> str:
     """Export chat session to file. Returns filename."""
-    from datetime import datetime
-
     # Get all user and assistant messages
     user_events = elog.read_by_kind("user_message")
     assistant_events = elog.read_by_kind("assistant_message")
@@ -312,6 +310,40 @@ def _prompt_for_model_choice(models: list[str]) -> str | None:
     return choice or None
 
 
+def _build_commands_table() -> Table:
+    """Build the commands help table (used at startup and for /help)."""
+    table = Table(
+        show_header=True,
+        header_style="header",
+        border_style="prompt",
+        title="[header]Commands[/header]",
+    )
+    table.add_column("Command", style="command", width=40)
+    table.add_column("Description", style="dim")
+
+    table.add_row("/help", "Show this list of commands")
+    table.add_row("/replay", "Show last 50 events")
+    table.add_row("/metrics", "Show ledger metrics summary")
+    table.add_row("/diag", "Show last 5 diagnostic turns")
+    table.add_row("/goals", "Show open internal goals")
+    table.add_row("/rsm [id | diff <a> <b>]", "Show Recursive Self-Model")
+    table.add_row("/graph stats", "Show event graph stats")
+    table.add_row("/graph thread <CID>", "Show thread for a commitment")
+    table.add_row("/config retrieval fixed limit <N>", "Set fixed window limit")
+    table.add_row("/rebuild-fast", "Verify fast RSM rebuild matches full")
+    table.add_row("/pm", "Admin commands (type '/pm' for help)")
+    table.add_row("/raw", "Show last assistant message with markers")
+    table.add_row("/model", "Switch to a different model")
+    table.add_row("/paste", "Multi-line prompt (end with <<<END)")
+    table.add_row("/pasteclip", "Paste from clipboard")
+    table.add_row("/load <path>", "Load prompt from file")
+    table.add_row("/web <query>", "Run a web search and log results")
+    table.add_row("/export [md|json]", "Export chat session to file")
+    table.add_row("/exit", "Quit")
+
+    return table
+
+
 def main() -> None:  # pragma: no cover - thin wrapper
     # Resolve canonical DB path with legacy fallback/migration
     import pathlib
@@ -360,38 +392,7 @@ def main() -> None:  # pragma: no cover - thin wrapper
     console.print()
 
     # Commands table
-    commands_table = Table(
-        show_header=True,
-        header_style="header",
-        border_style="prompt",
-        title="[header]Commands[/header]",
-    )
-    commands_table.add_column("Command", style="command", width=40)
-    commands_table.add_column("Description", style="dim")
-
-    commands_table.add_row("/help", "Show this list of commands")
-    commands_table.add_row("/replay", "Show last 50 events")
-    commands_table.add_row("/metrics", "Show ledger metrics summary")
-    commands_table.add_row("/diag", "Show last 5 diagnostic turns")
-    commands_table.add_row("/goals", "Show open internal goals")
-    commands_table.add_row("/rsm [id | diff <a> <b>]", "Show Recursive Self-Model")
-    commands_table.add_row("/graph stats", "Show event graph stats")
-    commands_table.add_row("/graph thread <CID>", "Show thread for a commitment")
-    commands_table.add_row(
-        "/config retrieval fixed limit <N>", "Set fixed window limit"
-    )
-    commands_table.add_row("/rebuild-fast", "Verify fast RSM rebuild matches full")
-    commands_table.add_row("/pm", "Admin commands (type '/pm' for help)")
-    commands_table.add_row("/raw", "Show last assistant message with markers")
-    commands_table.add_row("/model", "Switch to a different model")
-    commands_table.add_row("/paste", "Multi-line prompt (end with <<<END)")
-    commands_table.add_row("/pasteclip", "Paste from clipboard")
-    commands_table.add_row("/load <path>", "Load prompt from file")
-    commands_table.add_row("/web <query>", "Run a web search and log results")
-    commands_table.add_row("/export [md|json]", "Export chat session to file")
-    commands_table.add_row("/exit", "Quit")
-
-    console.print(commands_table)
+    console.print(_build_commands_table())
     console.print()
     # Brief autonomy note about idle optimization (deterministic behavior)
     console.print(
@@ -416,8 +417,6 @@ def main() -> None:  # pragma: no cover - thin wrapper
     try:
         while True:
             user = input("[User Prompt]: ")
-            if user is None:
-                break
             if user.strip().lower() in {"/exit", "exit", "quit"}:
                 break
             # Capture last event id before turn (for simple per-turn badge)
@@ -427,45 +426,7 @@ def main() -> None:  # pragma: no cover - thin wrapper
             raw_cmd = user.strip()
             cmd = raw_cmd.lower()
             if cmd == "/help":
-                # Show commands table
-                help_table = Table(
-                    show_header=True,
-                    header_style="header",
-                    border_style="prompt",
-                    title="[header]Commands[/header]",
-                )
-                help_table.add_column("Command", style="command", width=40)
-                help_table.add_column("Description", style="dim")
-
-                help_table.add_row("/help", "Show this list of commands")
-                help_table.add_row("/replay", "Show last 50 events")
-                help_table.add_row("/metrics", "Show ledger metrics summary")
-                help_table.add_row("/diag", "Show last 5 diagnostic turns")
-                help_table.add_row("/goals", "Show open internal goals")
-                help_table.add_row(
-                    "/rsm [id | diff <a> <b>]", "Show Recursive Self-Model"
-                )
-                help_table.add_row("/graph stats", "Show event graph stats")
-                help_table.add_row(
-                    "/graph thread <CID>", "Show thread for a commitment"
-                )
-                help_table.add_row(
-                    "/config retrieval fixed limit <N>", "Set fixed window limit"
-                )
-                help_table.add_row(
-                    "/rebuild-fast", "Verify fast RSM rebuild matches full"
-                )
-                help_table.add_row("/pm", "Admin commands (type '/pm' for help)")
-                help_table.add_row("/raw", "Show last assistant message with markers")
-                help_table.add_row("/model", "Switch to a different model")
-                help_table.add_row("/paste", "Multi-line prompt (end with <<<END)")
-                help_table.add_row("/pasteclip", "Paste from clipboard")
-                help_table.add_row("/load <path>", "Load prompt from file")
-                help_table.add_row("/web <query>", "Run a web search and log results")
-                help_table.add_row("/export [md|json]", "Export chat session to file")
-                help_table.add_row("/exit", "Quit")
-
-                console.print(help_table)
+                console.print(_build_commands_table())
                 continue
             if cmd.startswith("/rsm"):
                 output = handle_rsm_command(raw_cmd, elog)
@@ -645,7 +606,7 @@ def main() -> None:  # pragma: no cover - thin wrapper
                     console.print(
                         f"[prompt]({opened} opened, {closed} closed, {claims} claims)[/prompt]"
                     )
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
         return
 
 
@@ -1120,10 +1081,10 @@ def handle_config_command(command: str, eventlog: EventLog) -> Optional[str]:
     parts = command.strip().split()
     if parts[:3] != ["/config", "retrieval", "fixed"]:
         return "Usage: /config retrieval fixed limit <N>"
-    if len(parts) != 6 or parts[3] != "limit":
+    if len(parts) != 5 or parts[3] != "limit":
         return "Usage: /config retrieval fixed limit <N>"
     try:
-        limit = int(parts[5])
+        limit = int(parts[4])
     except ValueError:
         return "Limit must be an integer"
     if limit <= 0:
