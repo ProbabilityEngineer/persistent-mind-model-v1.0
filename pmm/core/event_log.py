@@ -110,6 +110,7 @@ class EventLog:
             "checkpoint_manifest",
             "embedding_add",
             "lifetime_memory",
+            "web_search",
             # New kinds introduced by enhancement features
             "stability_metrics",
             "coherence_check",

@@ -43,6 +43,68 @@ CLI_THEME = Theme(
 
 console = Console(theme=CLI_THEME)
 
+PASTE_TERMINATOR = "<<<END"
+
+
+def _read_multiline_prompt() -> str:
+    """Read a multi-line prompt until the terminator line is entered."""
+    print(f"Paste your text. End with a line containing only {PASTE_TERMINATOR}.")
+    lines: list[str] = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if line.strip() == PASTE_TERMINATOR:
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _read_clipboard_text() -> str:
+    """Read text from the system clipboard (macOS pbpaste)."""
+    try:
+        result = subprocess.run(
+            ["pbpaste"], capture_output=True, text=True, check=True
+        )
+        return (result.stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def _read_file_text(path: str) -> str:
+    try:
+        with open(os.path.expanduser(path), "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def _is_hidden_marker_line(line: str) -> bool:
+    stripped = (line or "").strip()
+    return stripped.startswith("WEB:")
+
+def _format_web_results(payload: Dict[str, object]) -> str:
+    ok = bool(payload.get("ok"))
+    provider = str(payload.get("provider") or "unknown")
+    query = str(payload.get("query") or "")
+    if not ok:
+        err = str(payload.get("error") or "unknown error")
+        return f"[error]Web search failed ({provider}): {err}[/error]"
+    lines = [f"[success]Web search ({provider}): {query}[/success]"]
+    results = payload.get("results") or []
+    for idx, item in enumerate(results, 1):
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "")
+        url = str(item.get("url") or "")
+        snippet = str(item.get("snippet") or "")
+        lines.append(f"{idx}. {title}")
+        if url:
+            lines.append(f"   {url}")
+        if snippet:
+            lines.append(f"   {snippet}")
+    return "\n".join(lines)
 
 def _export_chat_session(elog: EventLog, format: str = "markdown") -> str:
     """Export chat session to file. Returns filename."""
@@ -83,6 +145,8 @@ def _export_chat_session(elog: EventLog, format: str = "markdown") -> str:
                         or extract_reflect([ln]) is not None
                     ):
                         continue
+                    if _is_hidden_marker_line(ln):
+                        continue
                     try:
                         if extract_claims([ln]):
                             continue
@@ -119,6 +183,8 @@ def _export_chat_session(elog: EventLog, format: str = "markdown") -> str:
                         or extract_closures([ln])
                         or extract_reflect([ln]) is not None
                     ):
+                        continue
+                    if _is_hidden_marker_line(ln):
                         continue
                     try:
                         if extract_claims([ln]):
@@ -318,6 +384,10 @@ def main() -> None:  # pragma: no cover - thin wrapper
     commands_table.add_row("/pm", "Admin commands (type '/pm' for help)")
     commands_table.add_row("/raw", "Show last assistant message with markers")
     commands_table.add_row("/model", "Switch to a different model")
+    commands_table.add_row("/paste", "Multi-line prompt (end with <<<END)")
+    commands_table.add_row("/pasteclip", "Paste from clipboard")
+    commands_table.add_row("/load <path>", "Load prompt from file")
+    commands_table.add_row("/web <query>", "Run a web search and log results")
     commands_table.add_row("/export [md|json]", "Export chat session to file")
     commands_table.add_row("/exit", "Quit")
 
@@ -388,6 +458,10 @@ def main() -> None:  # pragma: no cover - thin wrapper
                 help_table.add_row("/pm", "Admin commands (type '/pm' for help)")
                 help_table.add_row("/raw", "Show last assistant message with markers")
                 help_table.add_row("/model", "Switch to a different model")
+                help_table.add_row("/paste", "Multi-line prompt (end with <<<END)")
+                help_table.add_row("/pasteclip", "Paste from clipboard")
+                help_table.add_row("/load <path>", "Load prompt from file")
+                help_table.add_row("/web <query>", "Run a web search and log results")
                 help_table.add_row("/export [md|json]", "Export chat session to file")
                 help_table.add_row("/exit", "Quit")
 
@@ -482,6 +556,48 @@ def main() -> None:  # pragma: no cover - thin wrapper
                 except Exception as e:
                     console.print(f"[error]Export failed: {e}[/error]")
                 continue
+            if cmd == "/paste":
+                user = _read_multiline_prompt()
+                if not user:
+                    console.print(
+                        "[prompt]No input provided. Try /pasteclip or /load <path>.[/prompt]"
+                    )
+                    continue
+            if cmd == "/pasteclip":
+                user = _read_clipboard_text()
+                if not user:
+                    console.print("[error]Clipboard read failed or empty.[/error]")
+                    continue
+            if cmd.startswith("/load "):
+                path = raw_cmd[len("/load ") :].strip()
+                if not path:
+                    console.print("[error]Missing file path.[/error]")
+                    continue
+                user = _read_file_text(path)
+                if not user:
+                    console.print("[error]File read failed or empty.[/error]")
+                    continue
+            if cmd.startswith("/web "):
+                from pmm.runtime.web_search import run_web_search
+
+                query = raw_cmd[len("/web ") :].strip()
+                if not query:
+                    console.print("[error]Missing query.[/error]")
+                    continue
+                payload = run_web_search(query)
+                self_source = {"source": "cli"}
+                try:
+                    elog.append(
+                        kind="web_search",
+                        content=json.dumps(
+                            payload, sort_keys=True, separators=(",", ":")
+                        ),
+                        meta=self_source,
+                    )
+                except Exception:
+                    pass
+                console.print(_format_web_results(payload))
+                continue
 
             events = loop.run_turn(user)
             ai_msgs = [e for e in events if e.get("kind") == "assistant_message"]
@@ -495,6 +611,8 @@ def main() -> None:  # pragma: no cover - thin wrapper
                         or extract_closures([ln])
                         or extract_reflect([ln]) is not None
                     ):
+                        continue
+                    if _is_hidden_marker_line(ln):
                         continue
                     try:
                         if extract_claims([ln]):

@@ -150,6 +150,23 @@ class RuntimeLoop:
         lines = (text or "").splitlines()
         return extract_reflect(lines)
 
+    def _extract_web_request(self, text: str) -> Dict[str, Any] | None:
+        lines = (text or "").splitlines()
+        for ln in lines:
+            stripped = (ln or "").strip()
+            if not stripped.startswith("WEB:"):
+                continue
+            payload = stripped.split("WEB:", 1)[1].strip()
+            if not payload:
+                continue
+            try:
+                parsed = json.loads(payload)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                return {"query": payload}
+        return None
+
     def _extract_claims(self, text: str) -> List[Claim]:
         lines = (text or "").splitlines()
         try:
@@ -294,12 +311,36 @@ class RuntimeLoop:
 
         # 3. Invoke model
         t0 = time.perf_counter()
+        effective_user_prompt = user_input
         assistant_reply = self.adapter.generate_reply(
-            system_prompt=system_prompt, user_prompt=user_input
+            system_prompt=system_prompt, user_prompt=effective_user_prompt
         )
         t1 = time.perf_counter()
 
-        # 3a. Try to parse optional structured JSON header (intent/outcome/etc. + concepts).
+        # 3a. Optional web search tool call (single pass).
+        web_request = self._extract_web_request(assistant_reply)
+        if web_request:
+            from pmm.runtime.web_search import run_web_search
+
+            query = str(web_request.get("query") or "").strip()
+            provider = web_request.get("provider")
+            limit = web_request.get("limit", 5)
+            tool_payload = run_web_search(query, provider=provider, limit=limit)
+            self.eventlog.append(
+                kind="web_search",
+                content=json.dumps(tool_payload, sort_keys=True, separators=(",", ":")),
+                meta={"source": "assistant", "trigger": "marker"},
+            )
+            effective_user_prompt = (
+                f"{user_input}\n\n[WEB_SEARCH_RESULTS]\n"
+                f"{json.dumps(tool_payload, sort_keys=True, separators=(',', ':'))}"
+            )
+            assistant_reply = self.adapter.generate_reply(
+                system_prompt=system_prompt, user_prompt=effective_user_prompt
+            )
+            t1 = time.perf_counter()
+
+        # 3b. Try to parse optional structured JSON header (intent/outcome/etc. + concepts).
         #     Expected pattern in test mode: first line is a JSON object, followed
         #     by normal free-text. We leave assistant_reply unchanged and only
         #     record a normalized payload + concepts for CTL indexing.
@@ -451,7 +492,9 @@ class RuntimeLoop:
         elif "ollama" in cls:
             prov = "ollama"
         model_name = getattr(self.adapter, "model", "") or ""
-        in_tokens = len((system_prompt or "").split()) + len((user_input or "").split())
+        in_tokens = len((system_prompt or "").split()) + len(
+            (effective_user_prompt or "").split()
+        )
         out_tokens = len((assistant_reply or "").split())
         # Use adapter-provided deterministic latency if present (e.g., DummyAdapter)
         lat_ms = getattr(self.adapter, "deterministic_latency_ms", None)
@@ -597,6 +640,7 @@ class RuntimeLoop:
                         ln
                         for ln in (last_ai["content"] or "").splitlines()
                         if not extract_commitments([ln.upper()])
+                        and not (ln or "").strip().startswith("WEB:")
                     ]
                     assistant_output = "\n".join(lines)
                     print(f"Assistant> {assistant_output}")
