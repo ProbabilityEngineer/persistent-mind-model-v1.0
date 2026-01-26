@@ -20,16 +20,18 @@ class AutonomySupervisor:
         self, eventlog: EventLog, epoch: str, interval_s: int, seed_limit: int = 2000
     ) -> None:
         self.eventlog = eventlog
-        self.epoch = epoch
         self.interval_s = interval_s
         self._running = False
+        # Validate and store epoch
+        self._epoch_ts = self._parse_epoch(epoch)
+        self.epoch = epoch
         # In-memory cache of slot_ids that already have autonomy_stimulus events
         self.seen_slot_ids: set[str] = set()
         # Bounded seeding to avoid full-ledger scans on startup; retain determinism
         # by using a stable slice of the most recent autonomy_stimulus events.
         try:
             seed_events = self.eventlog.read_by_kind(
-                "autonomy_stimulus", limit=max(1, int(seed_limit)), reverse=True
+                "autonomy_stimulus", limit=max(1, seed_limit), reverse=True
             )
         except Exception:
             seed_events = []
@@ -39,16 +41,27 @@ class AutonomySupervisor:
             if isinstance(sid, str) and sid:
                 self.seen_slot_ids.add(sid)
 
+    def _parse_epoch(self, epoch: str) -> float:
+        """Parse and validate epoch RFC3339 string to Unix timestamp."""
+        try:
+            dt = datetime.fromisoformat(epoch.replace("Z", "+00:00"))
+            return dt.timestamp()
+        except (ValueError, AttributeError) as e:
+            raise ValueError(
+                f"Invalid epoch format '{epoch}': expected RFC3339 string (e.g. '2025-01-01T00:00:00Z')"
+            ) from e
+
     def _epoch_timestamp(self) -> float:
-        """Parse epoch RFC3339 to Unix timestamp."""
-        dt = datetime.fromisoformat(self.epoch.replace("Z", "+00:00"))
-        return dt.timestamp()
+        """Return cached epoch Unix timestamp."""
+        return self._epoch_ts
 
     def _current_slot(self) -> int:
-        """Calculate current slot deterministically."""
+        """Calculate current slot deterministically. Returns 0 if epoch is in the future."""
         now = time.time()
-        epoch_ts = self._epoch_timestamp()
-        return int((now - epoch_ts) // self.interval_s)
+        elapsed = now - self._epoch_ts
+        if elapsed < 0:
+            return 0
+        return int(elapsed // self.interval_s)
 
     def _slot_id(self, slot: int) -> str:
         """Deterministic slot ID."""
@@ -77,7 +90,11 @@ class AutonomySupervisor:
         self._running = True
         while self._running:
             self.emit_stimulus_if_needed()
-            await asyncio.sleep(self.interval_s)
+            # Sleep until next slot boundary to prevent drift
+            now = time.time()
+            elapsed_in_slot = (now - self._epoch_ts) % self.interval_s
+            sleep_time = self.interval_s - elapsed_in_slot
+            await asyncio.sleep(sleep_time)
 
     def stop(self) -> None:
         """Stop the supervisor loop."""
