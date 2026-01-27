@@ -127,6 +127,10 @@ class EventLog:
             # New kinds for Indexer/Archivist
             "claim_from_text",
             "concept_bind_async",
+            # Ontological self-reflection event kinds
+            "ontology_snapshot",
+            "ontology_insight",
+            "commitment_analysis",
         }
         binding_kinds = {
             "metric_check",

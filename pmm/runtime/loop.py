@@ -36,7 +36,9 @@ from pmm.retrieval.vector import (
 )
 from pmm.runtime.bindings import ExecBindRouter
 from pmm.runtime.autonomy_supervisor import AutonomySupervisor
+from pmm.runtime.ontology_autonomy import OntologyAutonomy
 from pmm.core.autonomy_tracker import AutonomyTracker
+from pmm.core.commitment_analyzer import CommitmentAnalyzer
 from pmm.learning.outcome_tracker import build_outcome_observation_content
 from pmm.runtime.indexer import Indexer
 from pmm.runtime.ctl_injector import CTLLookupInjector
@@ -74,6 +76,11 @@ class RuntimeLoop:
         self.replay = replay
         self.autonomy = AutonomyKernel(eventlog, thresholds=thresholds)
         self.tracker = AutonomyTracker(eventlog)
+        # Ontology autonomy
+        self._commitment_analyzer = CommitmentAnalyzer(eventlog)
+        self._ontology_autonomy = OntologyAutonomy(
+            eventlog, self._commitment_analyzer, snapshot_interval=50
+        )
         self.indexer = Indexer(eventlog)
         self.ctl_injector = CTLLookupInjector(self.concept_graph)
         self.exec_router: ExecBindRouter | None = None
@@ -605,6 +612,12 @@ class RuntimeLoop:
                     meta={"about_event": ai_event_id},
                 )
                 self._parse_ref_lines(reflection_text)
+
+        # 10. Ontology autonomy: maybe emit snapshot and check for insights
+        if self._ontology_autonomy.maybe_emit_snapshot():
+            insights = self._ontology_autonomy.detect_insights()
+            if insights:
+                self._ontology_autonomy.emit_insights(insights)
 
         return self.eventlog.read_tail(limit=200)
 

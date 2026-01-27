@@ -16,6 +16,7 @@ from pmm.core.ledger_metrics import (
 )
 from pmm.core.commitment_manager import CommitmentManager
 from pmm.runtime.loop import RuntimeLoop
+from pmm.runtime.ontology_commands import handle_ontology_command
 from pmm.core.meme_graph import MemeGraph
 from pmm.core.semantic_extractor import (
     extract_claims,
@@ -330,6 +331,7 @@ def _build_commands_table() -> Table:
     table.add_row("/graph stats", "Show event graph stats")
     table.add_row("/graph thread <CID>", "Show thread for a commitment")
     table.add_row("/config retrieval fixed limit <N>", "Set fixed window limit")
+    table.add_row("/ontology", "Ontological self-reflection commands")
     table.add_row("/rebuild-fast", "Verify fast RSM rebuild matches full")
     table.add_row("/pm", "Admin commands (type '/pm' for help)")
     table.add_row("/raw", "Show last assistant message with markers")
@@ -447,6 +449,11 @@ def main() -> None:  # pragma: no cover - thin wrapper
                 out = handle_config_command(raw_cmd, elog)
                 if out:
                     print(out)
+                continue
+            if cmd.startswith("/ontology"):
+                out = handle_ontology_command(raw_cmd, elog)
+                if out:
+                    console.print(out)
                 continue
             if cmd == "/rebuild-fast":
                 out = handle_rebuild_fast(elog)

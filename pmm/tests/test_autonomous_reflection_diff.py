@@ -44,6 +44,14 @@ class MockEventLog:
                 return e
         return None
 
+    def read_by_kind(self, kind: str, reverse: bool = False, limit: int = None):
+        result = [e for e in self.events if e.get("kind") == kind]
+        if reverse:
+            result = list(reversed(result))
+        if limit:
+            result = result[:limit]
+        return result
+
 
 def test_autonomous_reflection_diff():
     """Test that user-turn and autonomous reflections produce different content."""

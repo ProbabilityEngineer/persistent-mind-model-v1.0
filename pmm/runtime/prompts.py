@@ -57,14 +57,19 @@ SYSTEM_PRIMER = (
 # ─────────────────────────────────────────────────────────────────────────────
 MARKER_INSTRUCTIONS = (
     "After your normal response, add a blank line followed by optional control lines:\n"
-    "COMMIT: <title>\n"
-    "CLOSE: <CID>\n"
+    "COMMIT: <title> OR COMMIT: {\"title\": \"...\", \"intended_outcome\": \"...\", \"criteria\": [...]}\n"
+    "CLOSE: <CID> OR CLOSE: {\"cid\": \"...\", \"actual_outcome\": \"...\", \"criteria_met\": {...}}\n"
     "CLAIM:<type>=<json>\n"
     "REFLECT:<json>\n"
     'WEB: {"query": "...", "provider": "brave", "limit": 5}\n'
     "WEB invokes a web search; use it only when fresh external facts are required.\n"
     "One marker per line, starting exactly at column 0 with no leading spaces, indentation, or markdown. "
-    "Never mix them into prose. Incorrect format means no ledger events append, breaking your self-coherence."
+    "Never mix them into prose. Incorrect format means no ledger events append, breaking your self-coherence.\n"
+    "\n"
+    "Structured COMMIT format (optional but recommended):\n"
+    "  {\"title\": \"Goal\", \"intended_outcome\": \"Expected result\", \"criteria\": [\"criterion1\", \"criterion2\"]}\n"
+    "Structured CLOSE format (optional but recommended):\n"
+    "  {\"cid\": \"abc123\", \"actual_outcome\": \"What happened\", \"criteria_met\": {\"criterion1\": true, \"criterion2\": false}}"
 )
 
 JSON_HEADER_GUIDANCE = (

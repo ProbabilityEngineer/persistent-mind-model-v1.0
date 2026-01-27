@@ -20,6 +20,31 @@ def extract_commitments(lines: List[str]) -> List[str]:
     ]
 
 
+def parse_commitment(raw: str) -> Dict[str, Any]:
+    """Parse commitment text, handling both JSON and legacy formats.
+
+    Returns dict with: title, intended_outcome, criteria
+    """
+    raw = raw.strip()
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and "title" in data:
+                return {
+                    "title": data["title"],
+                    "intended_outcome": data.get("intended_outcome", data["title"]),
+                    "criteria": data.get("criteria", []),
+                }
+        except json.JSONDecodeError:
+            pass
+    # Legacy format: plain text title
+    return {
+        "title": raw,
+        "intended_outcome": raw,
+        "criteria": [],
+    }
+
+
 def extract_claims(lines: List[str]) -> List[Tuple[str, Dict]]:
     """Return (type, data) tuples for CLAIM:<type>=<json> lines.
 
@@ -38,6 +63,40 @@ def extract_claims(lines: List[str]) -> List[Tuple[str, Dict]]:
 def extract_closures(lines: List[str]) -> List[str]:
     """Return CID texts for exact CLOSE: prefix lines."""
     return [ln.split("CLOSE:", 1)[1].strip() for ln in lines if ln.startswith("CLOSE:")]
+
+
+def parse_closure(raw: str) -> Dict[str, Any]:
+    """Parse closure text, handling both JSON and legacy formats.
+
+    Returns dict with: cid, actual_outcome, criteria_met, outcome_score
+    """
+    raw = raw.strip()
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and "cid" in data:
+                criteria_met = data.get("criteria_met", {})
+                # Compute outcome_score from criteria_met
+                if criteria_met:
+                    met_count = sum(1 for v in criteria_met.values() if v)
+                    outcome_score = met_count / len(criteria_met)
+                else:
+                    outcome_score = 1.0
+                return {
+                    "cid": data["cid"],
+                    "actual_outcome": data.get("actual_outcome", "completed"),
+                    "criteria_met": criteria_met,
+                    "outcome_score": outcome_score,
+                }
+        except json.JSONDecodeError:
+            pass
+    # Legacy format: plain CID
+    return {
+        "cid": raw,
+        "actual_outcome": "completed",
+        "criteria_met": {},
+        "outcome_score": 1.0,
+    }
 
 
 def extract_reflect(lines: List[str]) -> Dict[str, Any] | None:
