@@ -82,12 +82,75 @@ class CommitmentManager:
         )
         return cid
 
+    def open_commitment_structured(
+        self,
+        title: str,
+        intended_outcome: str = "",
+        criteria: Optional[List[str]] = None,
+        source: str = "assistant",
+    ) -> str:
+        """Open a commitment with structured outcome tracking fields."""
+        title = (title or "").strip()
+        if not title:
+            return ""
+        cid = sha1(title.encode("utf-8")).hexdigest()[:8]
+        meta: Dict[str, Any] = {
+            "cid": cid,
+            "origin": source,
+            "source": source,
+            "text": title,
+            "intended_outcome": intended_outcome or title,
+            "success_criteria": criteria or [],
+        }
+        impact = CommitmentEvaluator(self.eventlog).compute_impact_score(title)
+        meta["impact_score"] = impact
+        validate_event({"kind": "commitment_open", "meta": meta})
+        self.eventlog.append(
+            kind="commitment_open",
+            content=f"Commitment opened: {title}",
+            meta=meta,
+        )
+        return cid
+
     def close_commitment(self, cid: str, *, source: str = "assistant") -> Optional[int]:
         """Append a commitment_close event for the provided cid if non-empty."""
         cid = (cid or "").strip()
         if not cid:
             return None
         meta: Dict[str, Any] = {"cid": cid, "origin": source, "source": source}
+        validate_event({"kind": "commitment_close", "meta": meta})
+        return self.eventlog.append(
+            kind="commitment_close",
+            content=f"Commitment closed: {cid}",
+            meta=meta,
+        )
+
+    def close_commitment_structured(
+        self,
+        cid: str,
+        actual_outcome: str = "completed",
+        criteria_met: Optional[Dict[str, bool]] = None,
+        source: str = "assistant",
+    ) -> Optional[int]:
+        """Close a commitment with structured outcome tracking."""
+        cid = (cid or "").strip()
+        if not cid:
+            return None
+        criteria_met = criteria_met or {}
+        # Compute outcome_score
+        if criteria_met:
+            met_count = sum(1 for v in criteria_met.values() if v)
+            outcome_score = met_count / len(criteria_met)
+        else:
+            outcome_score = 1.0
+        meta: Dict[str, Any] = {
+            "cid": cid,
+            "origin": source,
+            "source": source,
+            "actual_outcome": actual_outcome,
+            "criteria_met": criteria_met,
+            "outcome_score": outcome_score,
+        }
         validate_event({"kind": "commitment_close", "meta": meta})
         return self.eventlog.append(
             kind="commitment_close",
