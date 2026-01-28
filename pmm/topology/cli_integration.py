@@ -4,6 +4,9 @@
 # Path: pmm/topology/cli_integration.py
 """CLI command handlers for topology analysis."""
 
+# @codesyncer-decision: CLI mirrors HTTP topology endpoints for local parity.
+# Date: 2026-01-28
+
 from __future__ import annotations
 
 from typing import Optional

@@ -4,6 +4,9 @@
 # Path: pmm/tests/test_topology_autonomy.py
 """Tests for topology-triggered autonomy decisions."""
 
+# @codesyncer-test: Topology alerts should force reflect decision.
+# Date: 2026-01-28
+
 from pmm.core.event_log import EventLog
 from pmm.core.concept_schemas import create_concept_define_payload
 from pmm.runtime.autonomy_kernel import AutonomyKernel

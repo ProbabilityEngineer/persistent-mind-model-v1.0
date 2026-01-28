@@ -4,6 +4,9 @@
 # Path: pmm/topology/api.py
 """FastAPI entrypoint for topology services."""
 
+# @codesyncer-decision: FastAPI + uvicorn chosen for topology HTTP interface.
+# Date: 2026-01-28
+
 from __future__ import annotations
 
 import argparse

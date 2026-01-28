@@ -4,6 +4,9 @@
 # Path: pmm/tests/test_topology_api.py
 """Tests for topology API endpoints."""
 
+# @codesyncer-test: Verify topology endpoints respond with expected schema.
+# Date: 2026-01-28
+
 import pytest
 
 pytest.importorskip("fastapi")

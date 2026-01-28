@@ -4,6 +4,10 @@
 # Path: pmm/core/identity_concepts.py
 """Canonical identity concept tokens for structural identity analysis."""
 
+# @codesyncer-decision: Explicit identity concept list is versioned for deterministic topology analysis.
+# Rationale: Avoids heuristic selection; aligns with user-provided list.
+# Date: 2026-01-28
+
 IDENTITY_CONCEPTS_VERSION = "v1"
 
 IDENTITY_CONCEPTS_V1 = [

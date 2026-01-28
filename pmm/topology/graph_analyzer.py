@@ -4,6 +4,10 @@
 # Path: pmm/topology/graph_analyzer.py
 """Graph topology analysis for ConceptGraph/CTL."""
 
+# @codesyncer-decision: Use NetworkX DiGraph as CTL topology substrate for deterministic metrics.
+# @codesyncer-performance: Cache centrality/connectivity; incremental updates support 10k-node scale.
+# Date: 2026-01-28
+
 from __future__ import annotations
 
 from dataclasses import dataclass

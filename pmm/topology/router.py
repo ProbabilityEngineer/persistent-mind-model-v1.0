@@ -4,6 +4,9 @@
 # Path: pmm/topology/router.py
 """FastAPI router for topology endpoints."""
 
+# @codesyncer-important: Degraded mode serves cached data during circuit-breaker/timeout events.
+# Date: 2026-01-28
+
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout

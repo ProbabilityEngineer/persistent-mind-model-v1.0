@@ -4,6 +4,10 @@
 # Path: pmm/topology/evolution_tracker.py
 """Track topology evolution across ledger windows."""
 
+# @codesyncer-decision: Windowed snapshots use event ranges to preserve replay determinism.
+# @codesyncer-performance: Snapshot cache avoids recomputation across repeated window comparisons.
+# Date: 2026-01-28
+
 from __future__ import annotations
 
 from dataclasses import dataclass

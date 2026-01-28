@@ -126,6 +126,9 @@ class AutonomyKernel:
         self.concept_graph = ConceptGraph(eventlog)
         self.concept_graph.rebuild()
         self.eventlog.register_listener(self.concept_graph.sync)
+        # @codesyncer-important: Topology alerts must influence autonomy decisions immediately.
+        # @codesyncer-decision: Identity topology uses explicit identity concept list.
+        # Date: 2026-01-28
         # Topology analysis for ConceptGraph/CTL signals
         self.topology = GraphTopologyAnalyzer(self.concept_graph)
         self.identity_topology = IdentityTopologyAnalyzer(

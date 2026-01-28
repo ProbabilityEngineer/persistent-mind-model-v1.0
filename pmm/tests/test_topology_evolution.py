@@ -4,6 +4,9 @@
 # Path: pmm/tests/test_topology_evolution.py
 """Tests for topology evolution tracker."""
 
+# @codesyncer-test: Windowed snapshots should reflect topology deltas deterministically.
+# Date: 2026-01-28
+
 from pmm.core.event_log import EventLog
 from pmm.core.concept_schemas import (
     create_concept_define_payload,

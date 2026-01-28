@@ -4,6 +4,9 @@
 # Path: pmm/topology/exporter.py
 """Export topology graphs and metrics for external visualization tools."""
 
+# @codesyncer-decision: Export formats limited to GraphML/GEXF/D3/Cytoscape; no embedded UI.
+# Date: 2026-01-28
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple

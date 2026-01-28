@@ -4,6 +4,9 @@
 # Path: pmm/tests/test_topology_identity.py
 """Tests for identity topology analysis."""
 
+# @codesyncer-test: Identity fragmentation alerts should trigger on disconnected identity nodes.
+# Date: 2026-01-28
+
 from pmm.core.event_log import EventLog
 from pmm.core.concept_graph import ConceptGraph
 from pmm.core.concept_schemas import create_concept_define_payload

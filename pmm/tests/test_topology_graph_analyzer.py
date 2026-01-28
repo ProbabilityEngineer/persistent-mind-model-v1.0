@@ -4,6 +4,9 @@
 # Path: pmm/tests/test_topology_graph_analyzer.py
 """Tests for GraphTopologyAnalyzer."""
 
+# @codesyncer-test: Validate core topology metrics on a deterministic toy graph.
+# Date: 2026-01-28
+
 from pmm.core.event_log import EventLog
 from pmm.core.concept_graph import ConceptGraph
 from pmm.core.concept_schemas import (

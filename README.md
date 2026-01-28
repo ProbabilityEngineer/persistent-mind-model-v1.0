@@ -318,6 +318,8 @@ pytest -q
 
 ## 🌐 Topology API
 
+<!-- @codesyncer-decision: Document topology API entrypoint + dependency. Date: 2026-01-28 -->
+
 Run the topology analysis service (FastAPI + uvicorn required):
 
 ```bash

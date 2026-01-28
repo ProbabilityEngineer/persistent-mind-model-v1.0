@@ -7,6 +7,9 @@
 import pathlib
 import sys
 
+# @codesyncer-hack: Allow demo execution without installing the package.
+# Remove when demos are run via installed entrypoints only.
+# Date: 2026-01-28
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))

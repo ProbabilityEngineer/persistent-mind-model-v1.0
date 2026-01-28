@@ -335,6 +335,8 @@ def _build_commands_table() -> Table:
     table.add_row("/ontology", "Ontological self-reflection commands")
     table.add_row("/rebuild-fast", "Verify fast RSM rebuild matches full")
     table.add_row("/temporal", "Temporal pattern analysis (type '/temporal' for help)")
+    # @codesyncer-decision: Expose /topology CLI command for parity with HTTP API.
+    # Date: 2026-01-28
     table.add_row("/topology", "Topology analysis (type '/topology' for help)")
     table.add_row("/pm", "Admin commands (type '/pm' for help)")
     table.add_row("/raw", "Show last assistant message with markers")

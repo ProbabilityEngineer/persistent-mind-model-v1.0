@@ -4,6 +4,10 @@
 # Path: pmm/topology/api_metrics.py
 """HTTP API metrics and circuit breaker for topology service."""
 
+# @codesyncer-decision: Enforce latency/error thresholds with circuit breaker + degraded reads.
+# @codesyncer-performance: In-memory percentile tracking for low overhead health checks.
+# Date: 2026-01-28
+
 from __future__ import annotations
 
 from collections import deque

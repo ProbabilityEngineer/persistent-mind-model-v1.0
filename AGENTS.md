@@ -48,3 +48,5 @@ Format locally with `black .` when needed.
 
 ## Configuration & Secrets
 - `.env` at repo root is auto-loaded by the CLI. Environment variables are allowed only for credentials or external API keys (e.g., `OPENAI_API_KEY`).
+
+<!-- @codesyncer-decision: AGENTS includes AI/agent rules references to CodeSyncer guidance. Date: 2026-01-28 -->

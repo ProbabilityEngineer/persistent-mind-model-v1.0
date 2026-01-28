@@ -4,6 +4,10 @@
 # Path: pmm/topology/identity_topology.py
 """Identity-focused topology analysis for ConceptGraph/CTL."""
 
+# @codesyncer-decision: Thresholds and hysteresis reflect user-defined identity stability criteria.
+# @codesyncer-important: Identity alerts gate autonomy decisions; preserve semantics.
+# Date: 2026-01-28
+
 from __future__ import annotations
 
 from dataclasses import dataclass
