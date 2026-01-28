@@ -183,6 +183,66 @@ class RuntimeLoop:
             parsed = []
         return [Claim(type=ctype, data=data) for ctype, data in parsed]
 
+    def _get_temporal_context(self) -> Optional[str]:
+        """Get temporal context to inject into system prompts."""
+        try:
+            events = self.eventlog.read_all()
+            if len(events) < 10:  # Not enough events for meaningful temporal analysis
+                return None
+
+            last_event_id = int(events[-1]["id"])
+            start_id = max(1, last_event_id - 30)  # Look at last 30 events
+
+            # Get recent temporal patterns
+            result = self.autonomy.temporal_analyzer.analyze_window(
+                start_id, last_event_id
+            )
+
+            # Build context string from significant patterns
+            context_parts = []
+
+            for pattern in result.patterns:
+                if pattern.confidence > 0.7:  # Only include high-confidence patterns
+                    if pattern.pattern_type == "low_identity_stability":
+                        context_parts.append(
+                            f"Recent identity coherence analysis shows stability degradation (confidence: {pattern.confidence:.2f})"
+                        )
+                    elif pattern.pattern_type == "commitment_burst":
+                        context_parts.append(
+                            f"Recent commitment clustering detected (confidence: {pattern.confidence:.2f})"
+                        )
+                    elif (
+                        pattern.pattern_type == "learning_loops"
+                        and pattern.confidence < 0.3
+                    ):
+                        context_parts.append(
+                            f"Learning stagnation detected (loop confidence: {pattern.confidence:.2f})"
+                        )
+                    elif pattern.pattern_type == "engagement_periods":
+                        context_parts.append(
+                            f"High engagement periods detected (confidence: {pattern.confidence:.2f})"
+                        )
+
+            # Check for anomalies
+            anomalies = self.autonomy.temporal_analyzer.detect_anomalies(
+                sensitivity=0.6
+            )
+            if anomalies:
+                context_parts.append(
+                    f"Recent temporal anomalies: {'; '.join(anomalies[:2])}"
+                )
+
+            if context_parts:
+                return "## Recent Temporal Patterns\n" + "\n".join(
+                    f"• {part}" for part in context_parts
+                )
+
+        except Exception:
+            # If temporal analysis fails, don't inject context
+            pass
+
+        return None
+
     def _parse_ref_lines(self, content: str) -> None:
         refs: List[str] = []
         parsed: Dict[str, Any] | None = None
@@ -314,6 +374,12 @@ class RuntimeLoop:
             context_has_graph=context_has_graph,
             history_len=total_events,
         )
+
+        # Add temporal context if enough events exist
+        temporal_context = self._get_temporal_context()
+        if temporal_context:
+            base_prompt = f"{temporal_context}\n\n{base_prompt}"
+
         system_prompt = f"{ctx_block}\n\n{base_prompt}" if ctx_block else base_prompt
 
         # 3. Invoke model
@@ -710,6 +776,47 @@ class RuntimeLoop:
             maybe_append_summary(self.eventlog)
         elif decision.decision == "index":
             self.indexer.run_indexing_cycle()
+        elif decision.decision == "temporal_reflection":
+            # Handle temporal reflection triggered by identity stability issues
+            from pmm.runtime.reflection_synthesizer import synthesize_reflection
+
+            meta_extra = {
+                "source": "autonomy_kernel",
+                "slot_id": slot_id,
+                "trigger": "temporal_pattern",
+                "reason": decision.reasoning,
+                "staleness_threshold": str(
+                    self.autonomy.thresholds["commitment_staleness"]
+                ),
+                "auto_close_threshold": str(
+                    self.autonomy.thresholds["commitment_auto_close"]
+                ),
+            }
+            reflection_id = synthesize_reflection(
+                self.eventlog,
+                meta_extra=meta_extra,
+                staleness_threshold=int(meta_extra["staleness_threshold"]),
+                auto_close_threshold=int(meta_extra["auto_close_threshold"]),
+                autonomy=self.autonomy,
+            )
+            if reflection_id:
+                target_event = self.eventlog.get(reflection_id)
+                self._parse_ref_lines(target_event["content"])
+        elif decision.decision == "temporal_analysis":
+            # Handle deep temporal analysis when anomalies detected
+            from pmm.temporal_analysis import TemporalAnalyzer
+
+            # Log the temporal analysis trigger
+            self.eventlog.append(
+                kind="temporal_analysis_triggered",
+                content=f"Temporal analysis triggered: {decision.reasoning}",
+                meta={
+                    "source": "autonomy_kernel",
+                    "trigger": "temporal_pattern",
+                    "reason": decision.reasoning,
+                    "evidence": decision.evidence,
+                },
+            )
 
         if self.exec_router is not None:
             self.exec_router.tick()

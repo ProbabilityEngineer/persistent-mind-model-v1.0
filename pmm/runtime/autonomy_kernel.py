@@ -40,6 +40,7 @@ from pmm.meta_learning.optimization_engine import (
     suggest_meta_policy_changes,
     build_meta_policy_update_content,
 )
+from pmm.temporal_analysis import TemporalAnalyzer
 
 
 def _last_event(events: List[Dict], kind: str) -> Optional[Dict]:
@@ -122,6 +123,8 @@ class AutonomyKernel:
         self.concept_graph = ConceptGraph(eventlog)
         self.concept_graph.rebuild()
         self.eventlog.register_listener(self.concept_graph.sync)
+        # TemporalAnalyzer for pattern-based decision making
+        self.temporal_analyzer = TemporalAnalyzer(eventlog)
         self.ticks_since_last_index = self._init_ticks_counter()
         self._stability_window = 100
         self._coherence_enabled = True
@@ -1279,6 +1282,11 @@ class AutonomyKernel:
                 evidence=[last_event_id],
             )
 
+        # 5. Temporal Pattern-Based Decision Making
+        temporal_decision = self._check_temporal_patterns(events)
+        if temporal_decision:
+            return temporal_decision
+
         return KernelDecision("idle", "no autonomous action needed", [])
 
     def _open_gap_commitments(self) -> List[Dict[str, Any]]:
@@ -1415,6 +1423,113 @@ class AutonomyKernel:
         for event in reversed(events):
             if event.get("kind") == "summary_update":
                 return int(event["id"])
+        return None
+
+    def _check_temporal_patterns(
+        self, events: List[Dict[str, Any]]
+    ) -> Optional[KernelDecision]:
+        """Check temporal patterns and return autonomous decision if action needed."""
+        if not events:
+            return None
+
+        last_event_id = int(events[-1]["id"])
+
+        # Only check temporal patterns if we have enough events (minimum 10)
+        if len(events) < 10:
+            return None
+
+        try:
+            # Analyze recent temporal patterns
+            start_id = max(1, last_event_id - 50)  # Look at last 50 events
+            result = self.temporal_analyzer.analyze_window(start_id, last_event_id)
+
+            # Check for identity coherence issues
+            for pattern in result.patterns:
+                if (
+                    pattern.pattern_type == "low_identity_stability"
+                    and pattern.confidence > 0.6
+                ):
+                    # Emit temporal pattern event to ledger
+                    self.eventlog.append(
+                        kind="temporal_pattern_detected",
+                        content=f"Identity stability degradation: {pattern.description}",
+                        meta={
+                            "source": "autonomy_kernel",
+                            "pattern_type": pattern.pattern_type,
+                            "confidence": pattern.confidence,
+                            "severity": pattern.severity,
+                            "time_range": pattern.time_range,
+                            "metrics": pattern.metrics,
+                        },
+                    )
+                    return KernelDecision(
+                        decision="temporal_reflection",
+                        reasoning=f"Identity stability degradation detected (confidence: {pattern.confidence:.2f})",
+                        evidence=[last_event_id],
+                    )
+
+            # Check for commitment clustering anomalies
+            for pattern in result.patterns:
+                if (
+                    pattern.pattern_type == "commitment_burst"
+                    and pattern.confidence > 0.8
+                ):
+                    # Emit temporal pattern event to ledger
+                    self.eventlog.append(
+                        kind="temporal_pattern_detected",
+                        content=f"Commitment clustering detected: {pattern.description}",
+                        meta={
+                            "source": "autonomy_kernel",
+                            "pattern_type": pattern.pattern_type,
+                            "confidence": pattern.confidence,
+                            "severity": pattern.severity,
+                            "time_range": pattern.time_range,
+                            "metrics": pattern.metrics,
+                        },
+                    )
+                    return KernelDecision(
+                        decision="temporal_analysis",
+                        reasoning=f"High commitment clustering detected (confidence: {pattern.confidence:.2f})",
+                        evidence=[last_event_id],
+                    )
+
+            # Check for cognitive evolution stagnation
+            for pattern in result.patterns:
+                if (
+                    pattern.pattern_type == "learning_loops"
+                    and pattern.confidence < 0.2
+                ):
+                    return KernelDecision(
+                        decision="reflect",
+                        reasoning=f"Learning stagnation detected (loop confidence: {pattern.confidence:.2f})",
+                        evidence=[last_event_id],
+                    )
+
+            # Check for temporal anomalies
+            anomalies = self.temporal_analyzer.detect_anomalies(sensitivity=0.7)
+            if anomalies:
+                # Emit anomaly detection event
+                self.eventlog.append(
+                    kind="temporal_anomaly_alert",
+                    content=f"Temporal anomalies detected: {'; '.join(anomalies[:3])}",
+                    meta={
+                        "source": "autonomy_kernel",
+                        "anomaly_count": len(anomalies),
+                        "anomalies": anomalies[:5],  # Store first 5 anomalies
+                        "sensitivity": 0.7,
+                    },
+                )
+                return KernelDecision(
+                    decision="temporal_analysis",
+                    reasoning=f"Temporal anomalies detected: {'; '.join(anomalies[:2])}",
+                    evidence=[last_event_id],
+                )
+
+        except Exception as e:
+            # If temporal analysis fails, log but don't crash the kernel
+            # In a production system, you might want to append a debug event
+            pass
+
         return None
 
     def _append_rsm_reflection(

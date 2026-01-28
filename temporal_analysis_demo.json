@@ -1,0 +1,57 @@
+{
+  "patterns": [
+    {
+      "type": "low_identity_stability",
+      "confidence": 0.5,
+      "time_range": [
+        1,
+        22
+      ],
+      "description": "Identity stability score: 0.50 (below threshold)",
+      "metrics": {
+        "stability_score": 0.5
+      },
+      "severity": "medium"
+    },
+    {
+      "type": "commitment_burst",
+      "confidence": 1.0,
+      "time_range": [
+        1,
+        22
+      ],
+      "description": "Detected 9 commitment creation bursts",
+      "metrics": {
+        "burst_count": 9
+      },
+      "severity": "medium"
+    },
+    {
+      "type": "learning_loops",
+      "confidence": 0.3,
+      "time_range": [
+        1,
+        22
+      ],
+      "description": "Detected 1 learning loops",
+      "metrics": {
+        "loop_count": 1
+      },
+      "severity": "low"
+    },
+    {
+      "type": "engagement_periods",
+      "confidence": 1.0,
+      "time_range": [
+        1,
+        22
+      ],
+      "description": "Identified 16 high engagement periods",
+      "metrics": {
+        "high_engagement_count": 16,
+        "total_periods": 16
+      },
+      "severity": "medium"
+    }
+  ]
+}

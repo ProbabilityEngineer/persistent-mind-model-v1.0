@@ -1,0 +1,5 @@
+type,confidence,start_id,end_id,description,severity
+low_identity_stability,0.5,1,22,Identity stability score: 0.50 (below threshold),medium
+commitment_burst,1.0,1,22,Detected 9 commitment creation bursts,medium
+learning_loops,0.3,1,22,Detected 1 learning loops,low
+engagement_periods,1.0,1,22,Identified 16 high engagement periods,medium
