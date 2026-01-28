@@ -15,6 +15,7 @@ from pmm.core.commitment_manager import CommitmentManager
 from pmm.core.meme_graph import MemeGraph
 from pmm.core.concept_graph import ConceptGraph
 from pmm.core.concept_metrics import check_concept_health
+from pmm.core.identity_concepts import IDENTITY_CONCEPTS_V1
 from pmm.core.concept_schemas import create_concept_bind_event_payload
 from pmm.runtime.reflection_synthesizer import synthesize_kernel_reflection
 from pmm.context.context_graph import ContextGraph
@@ -41,6 +42,8 @@ from pmm.meta_learning.optimization_engine import (
     build_meta_policy_update_content,
 )
 from pmm.temporal_analysis import TemporalAnalyzer
+from pmm.topology import GraphTopologyAnalyzer, IdentityTopologyAnalyzer
+from pmm.topology.identity_topology import IdentityTopologyThresholds
 
 
 def _last_event(events: List[Dict], kind: str) -> Optional[Dict]:
@@ -123,6 +126,14 @@ class AutonomyKernel:
         self.concept_graph = ConceptGraph(eventlog)
         self.concept_graph.rebuild()
         self.eventlog.register_listener(self.concept_graph.sync)
+        # Topology analysis for ConceptGraph/CTL signals
+        self.topology = GraphTopologyAnalyzer(self.concept_graph)
+        self.identity_topology = IdentityTopologyAnalyzer(
+            self.topology,
+            list(IDENTITY_CONCEPTS_V1),
+            thresholds=IdentityTopologyThresholds(),
+        )
+        self.eventlog.register_listener(self.topology.sync)
         # TemporalAnalyzer for pattern-based decision making
         self.temporal_analyzer = TemporalAnalyzer(eventlog)
         self.ticks_since_last_index = self._init_ticks_counter()
@@ -187,6 +198,45 @@ class AutonomyKernel:
             return False
 
         return True
+
+    def _topology_alert_decision(self) -> Optional[KernelDecision]:
+        result = self.identity_topology.analyze()
+        alerts = result.get("alerts") or []
+        if not alerts:
+            return None
+        metrics = result.get("metrics")
+        evidence = self._topology_evidence(metrics)
+        alert_types = ", ".join(sorted({a.get("type", "unknown") for a in alerts}))
+        severity = "critical" if any(a.get("level") == "critical" for a in alerts) else "warning"
+        reasoning = f"identity topology {severity}: {alert_types}"
+        return KernelDecision(decision="reflect", reasoning=reasoning, evidence=evidence)
+
+    def _topology_evidence(self, metrics: Any) -> List[int]:
+        tokens: List[str] = []
+        if hasattr(metrics, "bridge_nodes") and metrics.bridge_nodes:
+            tokens.extend([name for name, _ in metrics.bridge_nodes])
+        if hasattr(metrics, "components") and metrics.components:
+            # Prioritize smallest component for fragmentation evidence.
+            components = sorted(metrics.components, key=len)
+            tokens.extend(components[0])
+        tokens = [t for t in tokens if isinstance(t, str) and t]
+        event_ids: List[int] = []
+        for token in tokens:
+            root = self.concept_graph.concept_roots.get(token)
+            tail = self.concept_graph.concept_tails.get(token)
+            if isinstance(root, int):
+                event_ids.append(root)
+            if isinstance(tail, int):
+                event_ids.append(tail)
+        # Fall back to last event id if no evidence collected.
+        if not event_ids:
+            tail_events = self.eventlog.read_tail(1)
+            if tail_events:
+                try:
+                    event_ids.append(int(tail_events[-1]["id"]))
+                except Exception:
+                    pass
+        return sorted(set(event_ids))[:10]
 
     def ensure_rule_table_event(self) -> None:
         """Record the kernel's rule table in the ledger exactly once."""
@@ -1191,6 +1241,9 @@ class AutonomyKernel:
         self.execute_internal_goal(self.INTERNAL_GOAL_ANALYZE_GAPS)
         self.execute_internal_goal(self.INTERNAL_GOAL_MONITOR_RSM)
 
+        topology_decision = self._topology_alert_decision()
+        if topology_decision:
+            return topology_decision
         last_metrics = _last_event(events, "metrics_turn")
         if not last_metrics:
             return KernelDecision("idle", "no metrics_turn recorded yet", [])

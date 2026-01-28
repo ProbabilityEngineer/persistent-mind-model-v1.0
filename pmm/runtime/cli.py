@@ -335,6 +335,7 @@ def _build_commands_table() -> Table:
     table.add_row("/ontology", "Ontological self-reflection commands")
     table.add_row("/rebuild-fast", "Verify fast RSM rebuild matches full")
     table.add_row("/temporal", "Temporal pattern analysis (type '/temporal' for help)")
+    table.add_row("/topology", "Topology analysis (type '/topology' for help)")
     table.add_row("/pm", "Admin commands (type '/pm' for help)")
     table.add_row("/raw", "Show last assistant message with markers")
     table.add_row("/model", "Switch to a different model")
@@ -517,6 +518,13 @@ def main() -> None:  # pragma: no cover - thin wrapper
                 )
 
                 out = handle_temporal_command(raw_cmd, elog)
+                if out:
+                    console.print(out)
+                continue
+            if cmd.startswith("/topology"):
+                from pmm.topology.cli_integration import handle_topology_command
+
+                out = handle_topology_command(raw_cmd, elog)
                 if out:
                     console.print(out)
                 continue
