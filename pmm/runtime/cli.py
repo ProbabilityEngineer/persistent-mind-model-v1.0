@@ -65,9 +65,7 @@ def _read_multiline_prompt() -> str:
 def _read_clipboard_text() -> str:
     """Read text from the system clipboard (macOS pbpaste)."""
     try:
-        result = subprocess.run(
-            ["pbpaste"], capture_output=True, text=True, check=True
-        )
+        result = subprocess.run(["pbpaste"], capture_output=True, text=True, check=True)
         return (result.stdout or "").strip()
     except Exception:
         return ""
@@ -84,6 +82,7 @@ def _read_file_text(path: str) -> str:
 def _is_hidden_marker_line(line: str) -> bool:
     stripped = (line or "").strip()
     return stripped.startswith("WEB:")
+
 
 def _format_web_results(payload: Dict[str, object]) -> str:
     ok = bool(payload.get("ok"))
@@ -106,6 +105,7 @@ def _format_web_results(payload: Dict[str, object]) -> str:
         if snippet:
             lines.append(f"   {snippet}")
     return "\n".join(lines)
+
 
 def _export_chat_session(elog: EventLog, format: str = "markdown") -> str:
     """Export chat session to file. Returns filename."""
@@ -252,6 +252,7 @@ def _gather_models() -> list[str]:
     if os.environ.get("OPENAI_API_KEY"):
         try:
             from openai import OpenAI
+
             client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
             openai_models = [m.id for m in client.models.list()]
             models.extend([f"openai:{m}" for m in openai_models])
@@ -615,10 +616,6 @@ def main() -> None:  # pragma: no cover - thin wrapper
                     )
     except (KeyboardInterrupt, EOFError):
         return
-
-
-if __name__ == "__main__":  # pragma: no cover
-    main()
 
 
 def handle_model_command(command: str, loop: RuntimeLoop) -> Optional[str]:
@@ -1201,3 +1198,7 @@ def _format_diff(diff: Dict[str, object]) -> str:
 
 RSM_HELP_TEXT = "  /rsm [id | diff <a> <b>] - show Recursive Self-Model (includes stability, adaptability, instantiation)"
 _COLUMN_WIDTH = 24
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
