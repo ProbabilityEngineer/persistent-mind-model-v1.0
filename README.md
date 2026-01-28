@@ -316,6 +316,22 @@ pip install .[dev]
 pytest -q
 ```
 
+## 🌐 Topology API
+
+Run the topology analysis service (FastAPI + uvicorn required):
+
+```bash
+pip install -e ".[full,dev]"
+python -m pmm.topology.api --host 127.0.0.1 --port 8000
+```
+
+Example endpoints:
+
+- `GET /topology/summary`
+- `GET /topology/centrality?metric=pagerank&top_k=5`
+- `GET /topology/identity`
+- `GET /topology/export?format=graphml`
+
 <br>
 
 ## 🔧 Admin + Config
