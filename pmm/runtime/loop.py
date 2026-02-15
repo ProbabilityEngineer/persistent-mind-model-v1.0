@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from pmm.core.event_log import EventLog
@@ -172,6 +173,41 @@ class RuntimeLoop:
                     return parsed
             except json.JSONDecodeError:
                 return {"query": payload}
+        return None
+
+    def _extract_ledger_get_request(self, text: str) -> Dict[str, Any] | None:
+        body = text or ""
+        lines = body.splitlines()
+        for ln in lines:
+            stripped = (ln or "").strip()
+            if not stripped.startswith("LEDGER_GET:"):
+                continue
+            payload = stripped.split("LEDGER_GET:", 1)[1].strip()
+            if not payload:
+                continue
+            try:
+                parsed = json.loads(payload)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                try:
+                    return {"id": int(payload)}
+                except ValueError:
+                    return {"id": payload}
+        # Fallback: XML-style tool call emitted by some adapters, e.g.
+        # <invoke name="LEDGER_GET"><parameter name="id">1</parameter></invoke>
+        if "LEDGER_GET" in body:
+            match = re.search(
+                r'<invoke\s+name="LEDGER_GET".*?<parameter\s+name="id">\s*([^<]+?)\s*</parameter>',
+                body,
+                flags=re.DOTALL,
+            )
+            if match:
+                raw_id = match.group(1).strip()
+                try:
+                    return {"id": int(raw_id)}
+                except ValueError:
+                    return {"id": raw_id}
         return None
 
     def _extract_claims(self, text: str) -> List[Claim]:
@@ -413,7 +449,35 @@ class RuntimeLoop:
             )
             t1 = time.perf_counter()
 
-        # 3b. Try to parse optional structured JSON header (intent/outcome/etc. + concepts).
+        # 3b. Optional ledger event lookup (single pass).
+        ledger_request = self._extract_ledger_get_request(assistant_reply)
+        if ledger_request:
+            from pmm.runtime.ledger_reader import run_ledger_get
+
+            event_id = ledger_request.get("id")
+            include_meta = bool(ledger_request.get("include_meta", True))
+            max_content_chars = ledger_request.get("max_content_chars", 4000)
+            tool_payload = run_ledger_get(
+                self.eventlog,
+                event_id=event_id,
+                include_meta=include_meta,
+                max_content_chars=max_content_chars,
+            )
+            self.eventlog.append(
+                kind="ledger_read",
+                content=json.dumps(tool_payload, sort_keys=True, separators=(",", ":")),
+                meta={"source": "assistant", "trigger": "marker", "request": ledger_request},
+            )
+            effective_user_prompt = (
+                f"{effective_user_prompt}\n\n[LEDGER_GET_RESULTS]\n"
+                f"{json.dumps(tool_payload, sort_keys=True, separators=(',', ':'))}"
+            )
+            assistant_reply = self.adapter.generate_reply(
+                system_prompt=system_prompt, user_prompt=effective_user_prompt
+            )
+            t1 = time.perf_counter()
+
+        # 3c. Try to parse optional structured JSON header (intent/outcome/etc. + concepts).
         #     Expected pattern in test mode: first line is a JSON object, followed
         #     by normal free-text. We leave assistant_reply unchanged and only
         #     record a normalized payload + concepts for CTL indexing.

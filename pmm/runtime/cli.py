@@ -81,7 +81,16 @@ def _read_file_text(path: str) -> str:
 
 def _is_hidden_marker_line(line: str) -> bool:
     stripped = (line or "").strip()
-    return stripped.startswith("WEB:")
+    return (
+        stripped.startswith("WEB:")
+        or stripped.startswith("LEDGER_GET:")
+        or stripped.startswith("<minimax:tool_call>")
+        or stripped.startswith("</minimax:tool_call>")
+        or stripped.startswith("<invoke name=\"LEDGER_GET\">")
+        or stripped.startswith("</invoke>")
+        or stripped.startswith("<parameter name=\"id\">")
+        or stripped.startswith("</parameter>")
+    )
 
 
 def _format_web_results(payload: Dict[str, object]) -> str:
@@ -438,7 +447,7 @@ def main() -> None:  # pragma: no cover - thin wrapper
             if cmd.startswith("/rsm"):
                 output = handle_rsm_command(raw_cmd, elog)
                 if output:
-                    console.print(output)
+                    console.print(output, markup=False)
                 continue
             if cmd == "/pm" or cmd.startswith("/pm "):
                 out = handle_pm_command(raw_cmd, elog)
@@ -458,7 +467,7 @@ def main() -> None:  # pragma: no cover - thin wrapper
             if cmd.startswith("/ontology"):
                 out = handle_ontology_command(raw_cmd, elog)
                 if out:
-                    console.print(out)
+                    console.print(out, markup=False)
                 continue
             if cmd == "/rebuild-fast":
                 out = handle_rebuild_fast(elog)
@@ -494,7 +503,8 @@ def main() -> None:  # pragma: no cover - thin wrapper
                 ][-5:]
                 for e in events:
                     console.print(
-                        f"[{e['id']}] {e.get('ts', '')} metrics_turn | {e['content']}"
+                        f"[{e['id']}] {e.get('ts', '')} metrics_turn | {e['content']}",
+                        markup=False,
                     )
                 continue
             if cmd in {"/raw"}:
@@ -505,7 +515,10 @@ def main() -> None:  # pragma: no cover - thin wrapper
                     if e.get("kind") == "assistant_message"
                 ]
                 if tail:
-                    console.print(f"Assistant (raw)> {tail[-1].get('content') or ''}")
+                    console.print(
+                        f"Assistant (raw)> {tail[-1].get('content') or ''}",
+                        markup=False,
+                    )
                 else:
                     console.print("[prompt]No assistant messages yet.[/prompt]")
                 continue
@@ -521,14 +534,14 @@ def main() -> None:  # pragma: no cover - thin wrapper
 
                 out = handle_temporal_command(raw_cmd, elog)
                 if out:
-                    console.print(out)
+                    console.print(out, markup=False)
                 continue
             if cmd.startswith("/topology"):
                 from pmm.topology.cli_integration import handle_topology_command
 
                 out = handle_topology_command(raw_cmd, elog)
                 if out:
-                    console.print(out)
+                    console.print(out, markup=False)
                 continue
             if cmd.startswith("/export"):
                 # Parse format (default to markdown)
@@ -613,7 +626,8 @@ def main() -> None:  # pragma: no cover - thin wrapper
                 if assistant_output:
                     timestamp = datetime.now().strftime("%H:%M:%S")
                     console.print(f"\n[prompt]{timestamp}[/prompt]")
-                    console.print(f"[info][Assistant]:[/info] {assistant_output}\n")
+                    console.print("[info][Assistant]:[/info] ", end="")
+                    console.print(f"{assistant_output}\n", markup=False)
                 # Optional badge: per-turn counts (derived deterministically from ledger)
                 # Count claims from this assistant message
                 try:
