@@ -149,6 +149,57 @@ def test_runtime_loop_handles_xml_style_ledger_find_marker() -> None:
     assert payload["entries"], "expected at least one result"
 
 
+def test_runtime_loop_injects_tool_hint_for_lookup_queries() -> None:
+    log = EventLog(":memory:")
+
+    class HintCaptureAdapter:
+        deterministic_latency_ms = 0
+        model = "test-hint-capture-adapter"
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def generate_reply(self, system_prompt: str, user_prompt: str) -> str:
+            self.calls.append(user_prompt)
+            return "No tool needed.\nCOMMIT: noop"
+
+    adapter = HintCaptureAdapter()
+    loop = RuntimeLoop(eventlog=log, adapter=adapter, autonomy=False)
+    loop.run_turn("inspect events 10..20")
+
+    assert adapter.calls, "expected model call"
+    assert "[TOOL_HINT]" in adapter.calls[0]
+
+
+def test_runtime_loop_records_tool_telemetry_in_metrics_turn() -> None:
+    log = EventLog(":memory:")
+    log.append(kind="claim", content="identity coherence improved", meta={})
+
+    class FindAdapter:
+        deterministic_latency_ms = 0
+        model = "test-find-telemetry-adapter"
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def generate_reply(self, system_prompt: str, user_prompt: str) -> str:
+            self.calls.append(user_prompt)
+            if len(self.calls) == 1:
+                return 'LEDGER_FIND: {"query":"identity","kind":"claim","limit":5}'
+            return "Search complete.\nCOMMIT: done"
+
+    adapter = FindAdapter()
+    loop = RuntimeLoop(eventlog=log, adapter=adapter, autonomy=False)
+    loop.run_turn("find identity claims")
+
+    metrics = [e for e in log.read_all() if e.get("kind") == "metrics_turn"]
+    assert metrics, "expected metrics_turn event"
+    meta = metrics[-1].get("meta") or {}
+    assert meta.get("tool_hint_shown") is True
+    assert meta.get("tool_called") is True
+    assert meta.get("tool_name") == "LEDGER_FIND"
+
+
 class LedgerFindBareJsonAdapter:
     deterministic_latency_ms = 0
     model = "test-ledger-find-bare-json-adapter"
