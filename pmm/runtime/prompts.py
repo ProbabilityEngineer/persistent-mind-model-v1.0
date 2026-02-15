@@ -62,7 +62,9 @@ MARKER_INSTRUCTIONS = (
     "CLAIM:<type>=<json>\n"
     "REFLECT:<json>\n"
     'WEB: {"query": "...", "provider": "brave", "limit": 5}\n'
+    'LEDGER_GET: {"id": 123}\n'
     "WEB invokes a web search; use it only when fresh external facts are required.\n"
+    "LEDGER_GET fetches one ledger event by id for exact evidence.\n"
     "One marker per line, starting exactly at column 0 with no leading spaces, indentation, or markdown. "
     "Never mix them into prose. Incorrect format means no ledger events append, breaking your self-coherence.\n"
     "\n"

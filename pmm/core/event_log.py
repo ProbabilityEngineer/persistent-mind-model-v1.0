@@ -111,6 +111,7 @@ class EventLog:
             "embedding_add",
             "lifetime_memory",
             "web_search",
+            "ledger_read",
             # New kinds introduced by enhancement features
             "stability_metrics",
             "coherence_check",
