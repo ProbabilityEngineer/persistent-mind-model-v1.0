@@ -247,6 +247,20 @@ class RuntimeLoop:
                     req[key] = raw_val
             if req:
                 return req
+
+        # Fallback: bare JSON object in model output (no marker prefix).
+        # Accept only if it looks like a ledger-find payload to avoid
+        # colliding with structured assistant headers.
+        try:
+            raw = body.strip()
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                keys = set(parsed.keys())
+                marker_keys = {"query", "kind", "from_id", "to_id", "limit"}
+                if keys & marker_keys and ("from_id" in keys or "to_id" in keys):
+                    return parsed
+        except (TypeError, json.JSONDecodeError):
+            pass
         return None
 
     def _extract_claims(self, text: str) -> List[Claim]:

@@ -147,3 +147,33 @@ def test_runtime_loop_handles_xml_style_ledger_find_marker() -> None:
     payload = json.loads(searches[-1]["content"])
     assert payload["ok"] is True
     assert payload["entries"], "expected at least one result"
+
+
+class LedgerFindBareJsonAdapter:
+    deterministic_latency_ms = 0
+    model = "test-ledger-find-bare-json-adapter"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def generate_reply(self, system_prompt: str, user_prompt: str) -> str:
+        self.calls.append(user_prompt)
+        if len(self.calls) == 1:
+            return '{"query":"","from_id":1,"to_id":50,"limit":3}'
+        return "Bare JSON search complete.\nCOMMIT: used bare json find"
+
+
+def test_runtime_loop_handles_bare_json_style_ledger_find_payload() -> None:
+    log = EventLog(":memory:")
+    log.append(kind="claim", content="identity coherence improved", meta={})
+    adapter = LedgerFindBareJsonAdapter()
+    loop = RuntimeLoop(eventlog=log, adapter=adapter, autonomy=False)
+
+    loop.run_turn("find recent identity claims")
+
+    events = log.read_all()
+    searches = [e for e in events if e.get("kind") == "ledger_search"]
+    assert searches, "expected a ledger_search event"
+    payload = json.loads(searches[-1]["content"])
+    assert payload["ok"] is True
+    assert "[LEDGER_FIND_RESULTS]" in adapter.calls[-1]
