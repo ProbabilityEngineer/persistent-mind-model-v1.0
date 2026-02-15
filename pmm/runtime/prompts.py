@@ -63,8 +63,10 @@ MARKER_INSTRUCTIONS = (
     "REFLECT:<json>\n"
     'WEB: {"query": "...", "provider": "brave", "limit": 5}\n'
     'LEDGER_GET: {"id": 123}\n'
+    'LEDGER_FIND: {"query": "...", "kind": "claim", "from_id": 1, "to_id": 1000, "limit": 20}\n'
     "WEB invokes a web search; use it only when fresh external facts are required.\n"
     "LEDGER_GET fetches one ledger event by id for exact evidence.\n"
+    "LEDGER_FIND searches ledger entries by keyword and optional filters.\n"
     "One marker per line, starting exactly at column 0 with no leading spaces, indentation, or markdown. "
     "Never mix them into prose. Incorrect format means no ledger events append, breaking your self-coherence.\n"
     "\n"

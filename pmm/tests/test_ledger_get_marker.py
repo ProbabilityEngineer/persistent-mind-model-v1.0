@@ -36,7 +36,9 @@ def test_runtime_loop_handles_ledger_get_marker() -> None:
     payload = json.loads(ledger_reads[-1]["content"])
     assert payload["ok"] is True
     assert payload["id"] == 1
-    assert payload["entry"]["kind"] == "user_message"
+    expected = log.get(1)
+    assert expected is not None
+    assert payload["entry"]["kind"] == expected["kind"]
 
     assert len(adapter.calls) == 2
     assert "[LEDGER_GET_RESULTS]" in adapter.calls[-1]
@@ -76,3 +78,72 @@ def test_runtime_loop_handles_xml_style_ledger_get_marker() -> None:
     assert payload["ok"] is True
     assert payload["id"] == 1
     assert len(adapter.calls) == 2
+
+
+class LedgerFindAdapter:
+    deterministic_latency_ms = 0
+    model = "test-ledger-find-adapter"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def generate_reply(self, system_prompt: str, user_prompt: str) -> str:
+        self.calls.append(user_prompt)
+        if len(self.calls) == 1:
+            return 'Search first\nLEDGER_FIND: {"query":"identity","kind":"claim","limit":5}'
+        return "Search complete.\nCOMMIT: used ledger find"
+
+
+def test_runtime_loop_handles_ledger_find_marker() -> None:
+    log = EventLog(":memory:")
+    log.append(kind="claim", content="identity coherence improved", meta={})
+    adapter = LedgerFindAdapter()
+    loop = RuntimeLoop(eventlog=log, adapter=adapter, autonomy=False)
+
+    loop.run_turn("find identity claims")
+
+    events = log.read_all()
+    searches = [e for e in events if e.get("kind") == "ledger_search"]
+    assert searches, "expected a ledger_search event"
+    payload = json.loads(searches[-1]["content"])
+    assert payload["ok"] is True
+    assert payload["entries"], "expected at least one result"
+    assert "[LEDGER_FIND_RESULTS]" in adapter.calls[-1]
+
+
+class LedgerFindXmlAdapter:
+    deterministic_latency_ms = 0
+    model = "test-ledger-find-xml-adapter"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def generate_reply(self, system_prompt: str, user_prompt: str) -> str:
+        self.calls.append(user_prompt)
+        if len(self.calls) == 1:
+            return (
+                "<minimax:tool_call>\n"
+                '<invoke name="LEDGER_FIND">\n'
+                '<parameter name="query">identity</parameter>\n'
+                '<parameter name="kind">claim</parameter>\n'
+                '<parameter name="limit">5</parameter>\n'
+                "</invoke>\n"
+                "</minimax:tool_call>"
+            )
+        return "XML search complete.\nCOMMIT: used ledger find xml"
+
+
+def test_runtime_loop_handles_xml_style_ledger_find_marker() -> None:
+    log = EventLog(":memory:")
+    log.append(kind="claim", content="identity coherence improved", meta={})
+    adapter = LedgerFindXmlAdapter()
+    loop = RuntimeLoop(eventlog=log, adapter=adapter, autonomy=False)
+
+    loop.run_turn("find identity claims")
+
+    events = log.read_all()
+    searches = [e for e in events if e.get("kind") == "ledger_search"]
+    assert searches, "expected a ledger_search event"
+    payload = json.loads(searches[-1]["content"])
+    assert payload["ok"] is True
+    assert payload["entries"], "expected at least one result"

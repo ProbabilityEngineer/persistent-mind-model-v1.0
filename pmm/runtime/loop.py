@@ -210,6 +210,45 @@ class RuntimeLoop:
                     return {"id": raw_id}
         return None
 
+    def _extract_ledger_find_request(self, text: str) -> Dict[str, Any] | None:
+        body = text or ""
+        lines = body.splitlines()
+        for ln in lines:
+            stripped = (ln or "").strip()
+            if not stripped.startswith("LEDGER_FIND:"):
+                continue
+            payload = stripped.split("LEDGER_FIND:", 1)[1].strip()
+            if not payload:
+                continue
+            try:
+                parsed = json.loads(payload)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                return {"query": payload}
+
+        if "LEDGER_FIND" in body:
+            req: Dict[str, Any] = {}
+            for key in ("query", "kind", "from_id", "to_id", "limit"):
+                match = re.search(
+                    rf'<invoke\s+name="LEDGER_FIND".*?<parameter\s+name="{key}">\s*([^<]+?)\s*</parameter>',
+                    body,
+                    flags=re.DOTALL,
+                )
+                if not match:
+                    continue
+                raw_val = match.group(1).strip()
+                if key in ("from_id", "to_id", "limit"):
+                    try:
+                        req[key] = int(raw_val)
+                    except ValueError:
+                        req[key] = raw_val
+                else:
+                    req[key] = raw_val
+            if req:
+                return req
+        return None
+
     def _extract_claims(self, text: str) -> List[Claim]:
         lines = (text or "").splitlines()
         try:
@@ -477,7 +516,40 @@ class RuntimeLoop:
             )
             t1 = time.perf_counter()
 
-        # 3c. Try to parse optional structured JSON header (intent/outcome/etc. + concepts).
+        # 3c. Optional ledger search lookup (single pass).
+        ledger_find_request = self._extract_ledger_find_request(assistant_reply)
+        if ledger_find_request:
+            from pmm.runtime.ledger_reader import run_ledger_find
+
+            tool_payload = run_ledger_find(
+                self.eventlog,
+                query=ledger_find_request.get("query"),
+                kind=ledger_find_request.get("kind"),
+                from_id=ledger_find_request.get("from_id"),
+                to_id=ledger_find_request.get("to_id"),
+                limit=ledger_find_request.get("limit", 20),
+                include_meta=bool(ledger_find_request.get("include_meta", True)),
+                max_content_chars=ledger_find_request.get("max_content_chars", 2000),
+            )
+            self.eventlog.append(
+                kind="ledger_search",
+                content=json.dumps(tool_payload, sort_keys=True, separators=(",", ":")),
+                meta={
+                    "source": "assistant",
+                    "trigger": "marker",
+                    "request": ledger_find_request,
+                },
+            )
+            effective_user_prompt = (
+                f"{effective_user_prompt}\n\n[LEDGER_FIND_RESULTS]\n"
+                f"{json.dumps(tool_payload, sort_keys=True, separators=(',', ':'))}"
+            )
+            assistant_reply = self.adapter.generate_reply(
+                system_prompt=system_prompt, user_prompt=effective_user_prompt
+            )
+            t1 = time.perf_counter()
+
+        # 3d. Try to parse optional structured JSON header (intent/outcome/etc. + concepts).
         #     Expected pattern in test mode: first line is a JSON object, followed
         #     by normal free-text. We leave assistant_reply unchanged and only
         #     record a normalized payload + concepts for CTL indexing.
@@ -784,6 +856,8 @@ class RuntimeLoop:
                         for ln in (last_ai["content"] or "").splitlines()
                         if not extract_commitments([ln.upper()])
                         and not (ln or "").strip().startswith("WEB:")
+                        and not (ln or "").strip().startswith("LEDGER_GET:")
+                        and not (ln or "").strip().startswith("LEDGER_FIND:")
                     ]
                     assistant_output = "\n".join(lines)
                     print(f"Assistant> {assistant_output}")

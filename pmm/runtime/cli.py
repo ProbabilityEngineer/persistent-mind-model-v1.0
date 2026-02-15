@@ -84,11 +84,18 @@ def _is_hidden_marker_line(line: str) -> bool:
     return (
         stripped.startswith("WEB:")
         or stripped.startswith("LEDGER_GET:")
+        or stripped.startswith("LEDGER_FIND:")
         or stripped.startswith("<minimax:tool_call>")
         or stripped.startswith("</minimax:tool_call>")
         or stripped.startswith("<invoke name=\"LEDGER_GET\">")
+        or stripped.startswith("<invoke name=\"LEDGER_FIND\">")
         or stripped.startswith("</invoke>")
         or stripped.startswith("<parameter name=\"id\">")
+        or stripped.startswith("<parameter name=\"query\">")
+        or stripped.startswith("<parameter name=\"kind\">")
+        or stripped.startswith("<parameter name=\"from_id\">")
+        or stripped.startswith("<parameter name=\"to_id\">")
+        or stripped.startswith("<parameter name=\"limit\">")
         or stripped.startswith("</parameter>")
     )
 

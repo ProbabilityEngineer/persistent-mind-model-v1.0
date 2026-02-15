@@ -33,6 +33,7 @@ class EventLog:
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._listeners: List = []
+        self._fts_enabled = False
         self._init_db()
 
     def _init_db(self) -> None:
@@ -56,10 +57,94 @@ class EventLog:
             )
             # Index to support efficient kind-based scans.
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_kind ON events(kind);")
+            # Composite and time indexes for deterministic filtered scans.
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_kind_id_desc ON events(kind, id DESC);"
+            )
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);")
             # Unique index on hash to support idempotent append with INSERT OR IGNORE.
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_hash ON events(hash);"
             )
+            self._init_fts()
+            self._backfill_fts()
+
+    @staticmethod
+    def _row_to_event(row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "id": row["id"],
+            "ts": row["ts"],
+            "kind": row["kind"],
+            "content": row["content"],
+            "meta": json.loads(row["meta"] or "{}"),
+            "prev_hash": row["prev_hash"],
+            "hash": row["hash"],
+        }
+
+    def _init_fts(self) -> None:
+        """Initialize FTS5 table when available; fail open when unavailable."""
+        try:
+            self._conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS events_fts
+                USING fts5(
+                    content,
+                    meta_text,
+                    kind UNINDEXED,
+                    tokenize='unicode61'
+                );
+                """
+            )
+            self._fts_enabled = True
+        except sqlite3.OperationalError:
+            self._fts_enabled = False
+
+    def _backfill_fts(self, batch_size: int = 1000) -> None:
+        """Backfill missing rows into FTS index (append-only safe)."""
+        if not self._fts_enabled:
+            return
+        while True:
+            cur = self._conn.execute(
+                """
+                SELECT e.id, e.kind, e.content, e.meta
+                FROM events e
+                LEFT JOIN events_fts f ON f.rowid = e.id
+                WHERE f.rowid IS NULL
+                ORDER BY e.id ASC
+                LIMIT ?
+                """,
+                (int(batch_size),),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                break
+            for row in rows:
+                self._conn.execute(
+                    """
+                    INSERT INTO events_fts(rowid, content, meta_text, kind)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        int(row["id"]),
+                        str(row["content"] or ""),
+                        str(row["meta"] or ""),
+                        str(row["kind"] or ""),
+                    ),
+                )
+
+    def _index_event_for_search(
+        self, event_id: int, kind: str, content: str, meta: Dict[str, Any]
+    ) -> None:
+        if not self._fts_enabled:
+            return
+        meta_text = _canonical_json(meta or {})
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO events_fts(rowid, content, meta_text, kind)
+            VALUES (?, ?, ?, ?)
+            """,
+            (int(event_id), str(content or ""), meta_text, str(kind or "")),
+        )
 
     def register_listener(self, callback) -> None:
         """Register a callback(event_dict) when an event is appended."""
@@ -112,6 +197,7 @@ class EventLog:
             "lifetime_memory",
             "web_search",
             "ledger_read",
+            "ledger_search",
             # New kinds introduced by enhancement features
             "stability_metrics",
             "coherence_check",
@@ -275,6 +361,8 @@ class EventLog:
             "prev_hash": prev_hash_db,
             "hash": hash_db,
         }
+        with self._lock, self._conn:
+            self._index_event_for_search(ev_id, kind_db, content_db, meta_db)
         self._emit(ev)
         return ev_id
 
@@ -474,6 +562,70 @@ class EventLog:
             row = cur.fetchone()
             max_id = row[0] if row and row[0] is not None else 0
             return int(max_id)
+
+    def find_entries(
+        self,
+        *,
+        query: Optional[str] = None,
+        kind: Optional[str] = None,
+        start_id: Optional[int] = None,
+        end_id: Optional[int] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Find ledger entries using deterministic SQL filters and optional FTS."""
+        q = (query or "").strip()
+        kind_val = (kind or "").strip()
+        lim = max(1, min(int(limit), 50))
+
+        where_clauses: List[str] = []
+        params: List[Any] = []
+        if kind_val:
+            where_clauses.append("e.kind = ?")
+            params.append(kind_val)
+        if start_id is not None:
+            where_clauses.append("e.id >= ?")
+            params.append(int(start_id))
+        if end_id is not None:
+            where_clauses.append("e.id <= ?")
+            params.append(int(end_id))
+        where_sql = ""
+        if where_clauses:
+            where_sql = " AND " + " AND ".join(where_clauses)
+
+        with self._lock:
+            if q and self._fts_enabled:
+                sql = (
+                    "SELECT e.* "
+                    "FROM events_fts f JOIN events e ON e.id = f.rowid "
+                    "WHERE f MATCH ?"
+                    f"{where_sql} "
+                    "ORDER BY e.id DESC LIMIT ?"
+                )
+                try:
+                    cur = self._conn.execute(sql, [q, *params, lim])
+                    return [self._row_to_event(row) for row in cur.fetchall()]
+                except sqlite3.Error:
+                    # Fall back to LIKE path when query is not FTS-compatible.
+                    pass
+
+            if q:
+                like = f"%{q}%"
+                sql = (
+                    "SELECT e.* FROM events e "
+                    "WHERE (e.content LIKE ? OR e.meta LIKE ?)"
+                    f"{where_sql} "
+                    "ORDER BY e.id DESC LIMIT ?"
+                )
+                cur = self._conn.execute(sql, [like, like, *params, lim])
+                return [self._row_to_event(row) for row in cur.fetchall()]
+
+            sql = (
+                "SELECT e.* FROM events e WHERE 1=1"
+                f"{where_sql} "
+                "ORDER BY e.id DESC LIMIT ?"
+            )
+            cur = self._conn.execute(sql, [*params, lim])
+            return [self._row_to_event(row) for row in cur.fetchall()]
 
     def has_exec_bind(self, cid: str) -> bool:
         cid = (cid or "").strip()
