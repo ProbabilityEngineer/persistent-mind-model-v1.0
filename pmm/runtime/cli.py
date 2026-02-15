@@ -608,7 +608,20 @@ def main() -> None:  # pragma: no cover - thin wrapper
                 console.print(_format_web_results(payload))
                 continue
 
-            events = loop.run_turn(user)
+            try:
+                events = loop.run_turn(user)
+            except Exception as e:
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                console.print(f"\n[prompt]{timestamp}[/prompt]")
+                console.print(
+                    f"Turn failed (model/runtime error): {e}",
+                    style="error",
+                    markup=False,
+                )
+                console.print(
+                    "[prompt]Session is still active. You can retry, switch model with /model, or /exit.[/prompt]"
+                )
+                continue
             ai_msgs = [e for e in events if e.get("kind") == "assistant_message"]
             if ai_msgs:
                 content = ai_msgs[-1].get("content") or ""
