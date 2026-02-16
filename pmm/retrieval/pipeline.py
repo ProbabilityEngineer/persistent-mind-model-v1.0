@@ -64,6 +64,8 @@ class RetrievalConfig:
     hybrid_keyword_weight: float = 0.45
     hybrid_vector_weight: float = 0.45
     hybrid_recency_weight: float = 0.10
+    enable_rerank: bool = False
+    rerank_top_k: int = 40
 
 
 @dataclass
@@ -539,6 +541,52 @@ def run_retrieval_pipeline(
 
     # For active_concepts, we return the seed concepts.
     # We could also verify which concepts are actually present in the final selection.
+
+    # 6. Optional lightweight rerank over top-K selected events.
+    if config.enable_rerank and query_text.strip() and final_ids:
+        variants = build_query_variants(query_text, limit=8)
+        q_terms: Set[str] = set()
+        for v in variants or [query_text]:
+            for tok in v.lower().split():
+                tok_norm = "".join(ch for ch in tok if ch.isalnum() or ch == "_")
+                if len(tok_norm) >= 3:
+                    q_terms.add(tok_norm)
+
+        top_k = max(1, min(int(config.rerank_top_k), len(final_ids)))
+        head = final_ids[:top_k]
+        tail = final_ids[top_k:]
+
+        def _score_event(eid: int) -> float:
+            ev = eventlog.get(eid) or {}
+            kind = str(ev.get("kind") or "").lower()
+            content = str(ev.get("content") or "")
+            body = f"{kind} {content}".lower()
+            if not body.strip():
+                return 0.0
+
+            overlap = 0
+            for t in q_terms:
+                if t in body:
+                    overlap += 1
+
+            phrase_bonus = 0.0
+            for v in variants:
+                vv = v.lower()
+                if vv and vv in body:
+                    phrase_bonus = max(phrase_bonus, 0.8)
+
+            term_score = 0.0
+            if q_terms:
+                term_score = overlap / float(len(q_terms))
+            # Keep a tiny recency prior as tie-breaker.
+            recency = float(eid) / float(max(total_events, 1))
+            return (1.2 * term_score) + phrase_bonus + (0.05 * recency)
+
+        scored = [(eid, _score_event(eid)) for eid in head]
+        if any(score > 0.0 for _, score in scored):
+            scored.sort(key=lambda item: (-item[1], -item[0]))
+            head = [eid for eid, _ in scored]
+            final_ids = head + tail
 
     return RetrievalResult(
         event_ids=final_ids,

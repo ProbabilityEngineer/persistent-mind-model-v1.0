@@ -712,6 +712,13 @@ class RuntimeLoop:
                 pipeline_config.enable_hybrid_scoring = bool(
                     retrieval_cfg.get("hybrid_scoring", True)
                 )
+                pipeline_config.enable_rerank = bool(retrieval_cfg.get("rerank", True))
+                try:
+                    top_k = int(retrieval_cfg.get("rerank_top_k", 40))
+                    if top_k > 0:
+                        pipeline_config.rerank_top_k = top_k
+                except (TypeError, ValueError):
+                    pass
             elif retrieval_cfg.get("strategy") == "fixed":
                 # "fixed" implies relying on limit, usually no vector?
                 # But fixed means "fixed window".
@@ -724,6 +731,7 @@ class RuntimeLoop:
                 pipeline_config.enable_hybrid_scoring = bool(
                     retrieval_cfg.get("hybrid_scoring", False)
                 )
+                pipeline_config.enable_rerank = bool(retrieval_cfg.get("rerank", False))
 
         user_event = self.eventlog.get(user_event_id)
 
