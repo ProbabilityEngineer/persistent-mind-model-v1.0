@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sqlite3
 import time
 from datetime import datetime
 from typing import Optional
@@ -105,12 +106,18 @@ class AutonomySupervisor:
                 else "false",
             }
 
-            self.eventlog.append(
-                kind="autonomy_stimulus",
-                content=content,
-                meta=meta,
-            )
-            self.seen_slot_ids.add(slot_id)
+            try:
+                self.eventlog.append(
+                    kind="autonomy_stimulus",
+                    content=content,
+                    meta=meta,
+                )
+                self.seen_slot_ids.add(slot_id)
+            except sqlite3.OperationalError as exc:
+                # Lock contention can happen with concurrent writers/processes.
+                # Skip this cycle and retry on next tick without killing supervisor.
+                if "locked" not in str(exc).lower():
+                    raise
 
     async def run_forever(self) -> None:
         """Run the supervisor loop indefinitely."""

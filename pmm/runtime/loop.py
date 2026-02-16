@@ -712,6 +712,13 @@ class RuntimeLoop:
                 pipeline_config.enable_hybrid_scoring = bool(
                     retrieval_cfg.get("hybrid_scoring", True)
                 )
+                pipeline_config.enable_rerank = bool(retrieval_cfg.get("rerank", True))
+                try:
+                    top_k = int(retrieval_cfg.get("rerank_top_k", 40))
+                    if top_k > 0:
+                        pipeline_config.rerank_top_k = top_k
+                except (TypeError, ValueError):
+                    pass
             elif retrieval_cfg.get("strategy") == "fixed":
                 # "fixed" implies relying on limit, usually no vector?
                 # But fixed means "fixed window".
@@ -724,6 +731,7 @@ class RuntimeLoop:
                 pipeline_config.enable_hybrid_scoring = bool(
                     retrieval_cfg.get("hybrid_scoring", False)
                 )
+                pipeline_config.enable_rerank = bool(retrieval_cfg.get("rerank", False))
 
         user_event = self.eventlog.get(user_event_id)
 
@@ -747,6 +755,7 @@ class RuntimeLoop:
         selection_ids = retrieval_result.event_ids
         # We don't calculate vector scores in pipeline result yet, so pass empty/dummy
         selection_scores = [0.0] * len(selection_ids)
+        selection_reasons = retrieval_result.ranking_reasons or {}
 
         # Check if graph context is actually present
         context_has_graph = "## Graph" in ctx_block
@@ -1049,6 +1058,17 @@ class RuntimeLoop:
                 model=model,
                 dims=dims,
             )
+            # Periodic backfill for older events using current embedding model.
+            # This gradually refreshes coverage after model/dims changes.
+            try:
+                batch = int(retrieval_cfg.get("backfill_batch", 24))
+            except (TypeError, ValueError):
+                batch = 24
+            if batch > 0:
+                try:
+                    self.indexer.backfill_embeddings(model=model, dims=dims, batch=batch)
+                except Exception:
+                    pass
 
         # 4a. Parse REF: lines and append inter_ledger_ref events
         self._parse_ref_lines(assistant_reply)
@@ -1070,6 +1090,10 @@ class RuntimeLoop:
                     "turn_id": ai_event_id,
                     "selected": selection_ids,
                     "scores": selection_scores,
+                    "reasons": {
+                        str(eid): selection_reasons.get(eid, {})
+                        for eid in selection_ids[:20]
+                    },
                     "strategy": "vector",
                     "model": model,
                     "dims": dims,

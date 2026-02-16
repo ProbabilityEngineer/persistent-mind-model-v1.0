@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from pmm.core.event_log import EventLog
 from pmm.core.concept_graph import ConceptGraph
 from pmm.core.meme_graph import MemeGraph
+from pmm.retrieval.query_rewrite import build_query_variants
 from pmm.retrieval.vector import select_by_vector, select_by_concepts
 
 
@@ -63,6 +64,8 @@ class RetrievalConfig:
     hybrid_keyword_weight: float = 0.45
     hybrid_vector_weight: float = 0.45
     hybrid_recency_weight: float = 0.10
+    enable_rerank: bool = False
+    rerank_top_k: int = 40
 
 
 @dataclass
@@ -72,6 +75,7 @@ class RetrievalResult:
     event_ids: List[int]
     relevant_cids: List[str]
     active_concepts: List[str]
+    ranking_reasons: Dict[int, Dict[str, Any]] = field(default_factory=dict)
 
 
 def run_retrieval_pipeline(
@@ -219,19 +223,49 @@ def run_retrieval_pipeline(
     summary_expanded_ids: Set[int] = set()
     summary_pinned_ids: Set[int] = set()
     keyword_event_scores: Dict[int, float] = {}
+    ranking_reasons: Dict[int, Dict[str, Any]] = {}
 
     if config.enable_hybrid_scoring and query_text.strip():
-        keyword_hits = eventlog.find_entries(
-            query=query_text.strip(),
-            limit=min(max(1, int(config.vector_candidate_cap)), 50),
-        )
-        for ev in keyword_hits:
-            try:
-                eid = int(ev.get("id", 0))
-            except Exception:
-                continue
-            if eid > 0:
-                keyword_event_scores[eid] = 1.0
+        query_variants = build_query_variants(query_text, limit=8)
+        if not query_variants:
+            query_variants = [query_text.strip()]
+
+        for idx, qv in enumerate(query_variants):
+            # Earlier variants are stronger signals.
+            variant_weight = max(0.5, 1.0 - (0.1 * idx))
+            chunk_hits = eventlog.find_matching_chunks(
+                query=qv,
+                limit=min(max(1, int(config.vector_candidate_cap)), 100),
+            )
+            chunk_counts: Dict[int, int] = {}
+            for hit in chunk_hits:
+                try:
+                    eid = int(hit.get("event_id", 0))
+                except Exception:
+                    continue
+                if eid <= 0:
+                    continue
+                chunk_counts[eid] = chunk_counts.get(eid, 0) + 1
+            for eid, count in chunk_counts.items():
+                # Base keyword weight with a small bonus for multiple matched chunks.
+                score = min(1.5, 1.0 + 0.1 * max(0, count - 1))
+                score *= variant_weight
+                keyword_event_scores[eid] = max(keyword_event_scores.get(eid, 0.0), score)
+
+            keyword_hits = eventlog.find_entries(
+                query=qv,
+                limit=min(max(1, int(config.vector_candidate_cap)), 50),
+            )
+            for ev in keyword_hits:
+                try:
+                    eid = int(ev.get("id", 0))
+                except Exception:
+                    continue
+                if eid > 0:
+                    keyword_event_scores[eid] = max(
+                        keyword_event_scores.get(eid, 0.0),
+                        1.0 * variant_weight,
+                    )
 
     # Vector stage becomes a refiner over already selected slices only
     def _refine_with_vector(
@@ -274,6 +308,9 @@ def run_retrieval_pipeline(
         )
         vector_event_ids.update(refined_ids)
         vector_event_scores.update(refined_scores)
+        for eid, score in refined_scores.items():
+            rr = ranking_reasons.setdefault(eid, {})
+            rr["vector_score"] = float(f"{score:.6f}")
 
     # 3c. Summary vector search (unchanged but bounded to summaries)
     if (
@@ -304,6 +341,8 @@ def run_retrieval_pipeline(
                 if idx >= len(s_scores):
                     continue
                 vector_event_scores[int(eid)] = float(s_scores[idx])
+                rr = ranking_reasons.setdefault(int(eid), {})
+                rr["summary_vector_score"] = float(f"{float(s_scores[idx]):.6f}")
             summary_expanded_ids.update(summary_vector_ids)
             for sid in s_vec_ids:
                 ev = eventlog.get(sid) or {}
@@ -482,7 +521,17 @@ def run_retrieval_pipeline(
             kw = keyword_event_scores.get(eid, 0.0)
             vec = max(0.0, vector_event_scores.get(eid, 0.0))
             rec = _recency_norm(eid)
-            return (kw_w * kw) + (vec_w * vec) + (rec_w * rec) + _source_boost(eid)
+            source_boost = _source_boost(eid)
+            score = (kw_w * kw) + (vec_w * vec) + (rec_w * rec) + source_boost
+            rr = ranking_reasons.setdefault(eid, {})
+            if kw > 0.0:
+                rr["keyword_score"] = float(f"{kw:.6f}")
+            if vec > 0.0:
+                rr["vector_score"] = float(f"{vec:.6f}")
+            rr["recency_score"] = float(f"{rec:.6f}")
+            rr["source_boost"] = float(f"{source_boost:.6f}")
+            rr["hybrid_score"] = float(f"{score:.6f}")
+            return score
 
         ranked = sorted(candidates, key=lambda eid: (-_hybrid_score(eid), -eid))
         final_ids.extend(ranked[:remaining])
@@ -492,6 +541,16 @@ def run_retrieval_pipeline(
         summary_bucket = sorted(summary_set, reverse=True)
         vector_bucket = sorted(vector_set, reverse=True)
         residual_bucket = sorted(residual_set, reverse=True)
+        for eid in concept_set:
+            ranking_reasons.setdefault(eid, {})["bucket"] = "concept"
+        for eid in thread_set:
+            ranking_reasons.setdefault(eid, {})["bucket"] = "thread"
+        for eid in summary_set:
+            ranking_reasons.setdefault(eid, {})["bucket"] = "summary"
+        for eid in vector_set:
+            ranking_reasons.setdefault(eid, {})["bucket"] = "vector"
+        for eid in residual_set:
+            ranking_reasons.setdefault(eid, {})["bucket"] = "residual"
 
         def _take(bucket: List[int]) -> None:
             nonlocal remaining
@@ -510,8 +569,58 @@ def run_retrieval_pipeline(
     # For active_concepts, we return the seed concepts.
     # We could also verify which concepts are actually present in the final selection.
 
+    # 6. Optional lightweight rerank over top-K selected events.
+    if config.enable_rerank and query_text.strip() and final_ids:
+        variants = build_query_variants(query_text, limit=8)
+        q_terms: Set[str] = set()
+        for v in variants or [query_text]:
+            for tok in v.lower().split():
+                tok_norm = "".join(ch for ch in tok if ch.isalnum() or ch == "_")
+                if len(tok_norm) >= 3:
+                    q_terms.add(tok_norm)
+
+        top_k = max(1, min(int(config.rerank_top_k), len(final_ids)))
+        head = final_ids[:top_k]
+        tail = final_ids[top_k:]
+
+        def _score_event(eid: int) -> float:
+            ev = eventlog.get(eid) or {}
+            kind = str(ev.get("kind") or "").lower()
+            content = str(ev.get("content") or "")
+            body = f"{kind} {content}".lower()
+            if not body.strip():
+                return 0.0
+
+            overlap = 0
+            for t in q_terms:
+                if t in body:
+                    overlap += 1
+
+            phrase_bonus = 0.0
+            for v in variants:
+                vv = v.lower()
+                if vv and vv in body:
+                    phrase_bonus = max(phrase_bonus, 0.8)
+
+            term_score = 0.0
+            if q_terms:
+                term_score = overlap / float(len(q_terms))
+            # Keep a tiny recency prior as tie-breaker.
+            recency = float(eid) / float(max(total_events, 1))
+            return (1.2 * term_score) + phrase_bonus + (0.05 * recency)
+
+        scored = [(eid, _score_event(eid)) for eid in head]
+        if any(score > 0.0 for _, score in scored):
+            for eid, score in scored:
+                rr = ranking_reasons.setdefault(eid, {})
+                rr["rerank_score"] = float(f"{score:.6f}")
+            scored.sort(key=lambda item: (-item[1], -item[0]))
+            head = [eid for eid, _ in scored]
+            final_ids = head + tail
+
     return RetrievalResult(
         event_ids=final_ids,
         relevant_cids=sorted(relevant_cids),
         active_concepts=seed_concepts_list,
+        ranking_reasons=ranking_reasons,
     )

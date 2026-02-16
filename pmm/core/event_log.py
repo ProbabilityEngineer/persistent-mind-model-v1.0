@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Dict, List, Optional
@@ -29,45 +30,77 @@ class EventLog:
     """Persistent append-only log of events with hash chaining."""
 
     def __init__(self, path: str = ":memory:") -> None:
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn = sqlite3.connect(path, check_same_thread=False, timeout=2.0)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout = 2000")
         self._lock = threading.RLock()
         self._listeners: List = []
         self._fts_enabled = False
         self._init_db()
 
     def _init_db(self) -> None:
-        with self._conn:
-            self._conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ts TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    meta TEXT NOT NULL,
-                    prev_hash TEXT,
-                    hash TEXT
-                );
-                """
-            )
-            # Index to support efficient tail queries (ORDER BY id DESC LIMIT ?).
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_events_id_desc ON events(id DESC);"
-            )
-            # Index to support efficient kind-based scans.
-            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_kind ON events(kind);")
-            # Composite and time indexes for deterministic filtered scans.
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_events_kind_id_desc ON events(kind, id DESC);"
-            )
-            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);")
-            # Unique index on hash to support idempotent append with INSERT OR IGNORE.
-            self._conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_hash ON events(hash);"
-            )
-            self._init_fts()
-            self._backfill_fts()
+        try:
+            with self._conn:
+                try:
+                    self._conn.execute("PRAGMA journal_mode = WAL")
+                except sqlite3.OperationalError:
+                    pass
+                self._conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        meta TEXT NOT NULL,
+                        prev_hash TEXT,
+                        hash TEXT
+                    );
+                    """
+                )
+                # Index to support efficient tail queries (ORDER BY id DESC LIMIT ?).
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_events_id_desc ON events(id DESC);"
+                )
+                # Index to support efficient kind-based scans.
+                self._conn.execute("CREATE INDEX IF NOT EXISTS idx_kind ON events(kind);")
+                # Composite and time indexes for deterministic filtered scans.
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_events_kind_id_desc ON events(kind, id DESC);"
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);"
+                )
+                # Unique index on hash to support idempotent append with INSERT OR IGNORE.
+                self._conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_hash ON events(hash);"
+                )
+                self._conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS event_chunks (
+                        event_id INTEGER NOT NULL,
+                        chunk_idx INTEGER NOT NULL,
+                        chunk_text TEXT NOT NULL,
+                        PRIMARY KEY (event_id, chunk_idx)
+                    );
+                    """
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_event_chunks_event ON event_chunks(event_id);"
+                )
+                self._init_fts()
+                self._backfill_fts()
+                # Keep startup responsive on large ledgers; backfill incrementally.
+                try:
+                    self._backfill_chunks(batch_size=300, max_batches=1)
+                except sqlite3.OperationalError:
+                    # Fail-open when another process holds a write lock.
+                    pass
+        except sqlite3.OperationalError as exc:
+            # Fail-open on lock contention from another active process.
+            if "locked" in str(exc).lower():
+                return
+            raise
 
     @staticmethod
     def _row_to_event(row: sqlite3.Row) -> Dict[str, Any]:
@@ -91,6 +124,17 @@ class EventLog:
                     content,
                     meta_text,
                     kind UNINDEXED,
+                    tokenize='unicode61'
+                );
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS events_chunks_fts
+                USING fts5(
+                    event_id UNINDEXED,
+                    chunk_idx UNINDEXED,
+                    chunk_text,
                     tokenize='unicode61'
                 );
                 """
@@ -132,6 +176,74 @@ class EventLog:
                     ),
                 )
 
+    @staticmethod
+    def _split_content_chunks(
+        content: str, *, chunk_size: int = 320, overlap: int = 64
+    ) -> List[str]:
+        text = str(content or "")
+        if not text:
+            return []
+        if len(text) <= chunk_size:
+            return [text]
+
+        chunks: List[str] = []
+        start = 0
+        step = max(1, chunk_size - overlap)
+        while start < len(text):
+            end = min(len(text), start + chunk_size)
+            chunk = text[start:end]
+            chunks.append(chunk)
+            if end >= len(text):
+                break
+            start += step
+        return chunks
+
+    @staticmethod
+    def _snippet_around_query(text: str, query: str, max_chars: int) -> str:
+        src = str(text or "")
+        q = str(query or "").strip()
+        if not src:
+            return ""
+        if not q:
+            return src[:max_chars]
+        low = src.lower()
+        qlow = q.lower()
+        at = low.find(qlow)
+        if at < 0:
+            return src[:max_chars]
+        left = max(0, at - (max_chars // 3))
+        right = min(len(src), left + max_chars)
+        return src[left:right]
+
+    def _backfill_chunks(self, batch_size: int = 500, max_batches: int = 1) -> None:
+        batches = 0
+        while True:
+            if batches >= max(1, int(max_batches)):
+                break
+            cur = self._conn.execute(
+                """
+                SELECT e.id, e.content
+                FROM events e
+                LEFT JOIN event_chunks c ON c.event_id = e.id
+                WHERE c.event_id IS NULL
+                ORDER BY e.id ASC
+                LIMIT ?
+                """,
+                (int(batch_size),),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                break
+            for row in rows:
+                try:
+                    self._index_chunks_for_event(
+                        int(row["id"]), str(row["content"] or ""), replace=False
+                    )
+                except sqlite3.OperationalError:
+                    # Another process may own a lock; defer to a future startup.
+                    return
+            batches += 1
+
     def _index_event_for_search(
         self, event_id: int, kind: str, content: str, meta: Dict[str, Any]
     ) -> None:
@@ -145,6 +257,36 @@ class EventLog:
             """,
             (int(event_id), str(content or ""), meta_text, str(kind or "")),
         )
+        self._index_chunks_for_event(int(event_id), str(content or ""), replace=True)
+
+    def _index_chunks_for_event(self, event_id: int, content: str, replace: bool) -> None:
+        chunks = self._split_content_chunks(content)
+        if replace:
+            self._conn.execute(
+                "DELETE FROM event_chunks WHERE event_id = ?",
+                (int(event_id),),
+            )
+            if self._fts_enabled:
+                self._conn.execute(
+                    "DELETE FROM events_chunks_fts WHERE event_id = ?",
+                    (str(int(event_id)),),
+                )
+        for idx, chunk_text in enumerate(chunks):
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO event_chunks(event_id, chunk_idx, chunk_text)
+                VALUES (?, ?, ?)
+                """,
+                (int(event_id), int(idx), str(chunk_text)),
+            )
+            if self._fts_enabled:
+                self._conn.execute(
+                    """
+                    INSERT INTO events_chunks_fts(event_id, chunk_idx, chunk_text)
+                    VALUES (?, ?, ?)
+                    """,
+                    (str(int(event_id)), str(int(idx)), str(chunk_text)),
+                )
 
     def register_listener(self, callback) -> None:
         """Register a callback(event_dict) when an event is appended."""
@@ -318,39 +460,59 @@ class EventLog:
                 # Fail-open if policy unreadable
                 pass
 
-        with self._lock, self._conn:
-            # Idempotent append using UNIQUE(hash) and INSERT OR IGNORE:
-            # - On first insert, a new row is created.
-            # - On conflict, no new row is created; we look up the existing row
-            #   and emit it to listeners, returning its id.
-            cur = self._conn.execute(
-                "INSERT OR IGNORE INTO events (ts, kind, content, meta, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?)",
-                (ts, kind, content, _canonical_json(meta), prev_hash, digest),
-            )
-            if cur.rowcount == 0:
-                # Row with identical hash already exists; fetch canonical row.
-                cur_row = self._conn.execute(
-                    "SELECT id, ts, kind, content, meta, prev_hash, hash FROM events WHERE hash = ?",
-                    (digest,),
-                )
-                row = cur_row.fetchone()
-                if row is None:
-                    raise RuntimeError("Invariant violation: hash conflict without row")
-                ev_id = int(row["id"])
-                ts_db = row["ts"]
-                kind_db = row["kind"]
-                content_db = row["content"]
-                meta_db = json.loads(row["meta"] or "{}")
-                prev_hash_db = row["prev_hash"]
-                hash_db = row["hash"]
-            else:
-                ev_id = int(cur.lastrowid)
-                ts_db = ts
-                kind_db = kind
-                content_db = content
-                meta_db = meta
-                prev_hash_db = prev_hash
-                hash_db = digest
+        max_retries = 2
+        for attempt in range(max_retries):
+            # Recompute prev_hash/digest on each write attempt so hash-chain remains
+            # canonical if another writer appended while we were waiting.
+            prev_hash = self._last_hash()
+            payload = {
+                "kind": kind,
+                "content": content,
+                "meta": meta,
+                "prev_hash": prev_hash,
+            }
+            digest = sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+            try:
+                with self._lock, self._conn:
+                    # Idempotent append using UNIQUE(hash) and INSERT OR IGNORE:
+                    # - On first insert, a new row is created.
+                    # - On conflict, no new row is created; we look up the existing row
+                    #   and emit it to listeners, returning its id.
+                    cur = self._conn.execute(
+                        "INSERT OR IGNORE INTO events (ts, kind, content, meta, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?)",
+                        (ts, kind, content, _canonical_json(meta), prev_hash, digest),
+                    )
+                    if cur.rowcount == 0:
+                        # Row with identical hash already exists; fetch canonical row.
+                        cur_row = self._conn.execute(
+                            "SELECT id, ts, kind, content, meta, prev_hash, hash FROM events WHERE hash = ?",
+                            (digest,),
+                        )
+                        row = cur_row.fetchone()
+                        if row is None:
+                            raise RuntimeError(
+                                "Invariant violation: hash conflict without row"
+                            )
+                        ev_id = int(row["id"])
+                        ts_db = row["ts"]
+                        kind_db = row["kind"]
+                        content_db = row["content"]
+                        meta_db = json.loads(row["meta"] or "{}")
+                        prev_hash_db = row["prev_hash"]
+                        hash_db = row["hash"]
+                    else:
+                        ev_id = int(cur.lastrowid)
+                        ts_db = ts
+                        kind_db = kind
+                        content_db = content
+                        meta_db = meta
+                        prev_hash_db = prev_hash
+                        hash_db = digest
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == max_retries - 1:
+                    raise
+                time.sleep(0.03 * (attempt + 1))
 
         ev = {
             "id": ev_id,
@@ -361,8 +523,12 @@ class EventLog:
             "prev_hash": prev_hash_db,
             "hash": hash_db,
         }
-        with self._lock, self._conn:
-            self._index_event_for_search(ev_id, kind_db, content_db, meta_db)
+        try:
+            with self._lock, self._conn:
+                self._index_event_for_search(ev_id, kind_db, content_db, meta_db)
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
         self._emit(ev)
         return ev_id
 
@@ -626,6 +792,99 @@ class EventLog:
             )
             cur = self._conn.execute(sql, [*params, lim])
             return [self._row_to_event(row) for row in cur.fetchall()]
+
+    def find_matching_chunks(
+        self,
+        *,
+        query: str,
+        kind: Optional[str] = None,
+        start_id: Optional[int] = None,
+        end_id: Optional[int] = None,
+        limit: int = 20,
+        snippet_chars: int = 180,
+    ) -> List[Dict[str, Any]]:
+        """Return chunk-level keyword matches with parent event IDs."""
+        q = (query or "").strip()
+        if not q:
+            return []
+        lim = max(1, min(int(limit), 100))
+        snip = max(40, int(snippet_chars))
+        kind_val = (kind or "").strip()
+
+        where_clauses: List[str] = []
+        params: List[Any] = []
+        if kind_val:
+            where_clauses.append("e.kind = ?")
+            params.append(kind_val)
+        if start_id is not None:
+            where_clauses.append("e.id >= ?")
+            params.append(int(start_id))
+        if end_id is not None:
+            where_clauses.append("e.id <= ?")
+            params.append(int(end_id))
+        where_sql = ""
+        if where_clauses:
+            where_sql = " AND " + " AND ".join(where_clauses)
+
+        with self._lock:
+            rows: List[sqlite3.Row] = []
+            if self._fts_enabled:
+                sql = (
+                    "SELECT c.event_id, c.chunk_idx, c.chunk_text, e.kind "
+                    "FROM events_chunks_fts c "
+                    "JOIN events e ON e.id = CAST(c.event_id AS INTEGER) "
+                    "WHERE events_chunks_fts MATCH ?"
+                    f"{where_sql} "
+                    "ORDER BY e.id DESC, CAST(c.chunk_idx AS INTEGER) ASC LIMIT ?"
+                )
+                try:
+                    cur = self._conn.execute(sql, [q, *params, lim])
+                    rows = cur.fetchall()
+                except sqlite3.Error:
+                    rows = []
+
+            if not rows:
+                # Fallback path: use full-event search and derive matching chunks
+                # at query time (works even before chunk backfill completes).
+                fallback_rows = self.find_entries(
+                    query=q,
+                    kind=kind_val or None,
+                    start_id=start_id,
+                    end_id=end_id,
+                    limit=max(lim * 3, lim),
+                )
+                out: List[Dict[str, Any]] = []
+                for row in fallback_rows:
+                    event_id = int(row["id"])
+                    chunks = self._split_content_chunks(str(row.get("content") or ""))
+                    for idx, chunk_text in enumerate(chunks):
+                        if q.lower() in chunk_text.lower():
+                            out.append(
+                                {
+                                    "event_id": event_id,
+                                    "kind": str(row.get("kind") or ""),
+                                    "chunk_idx": idx,
+                                    "snippet": self._snippet_around_query(
+                                        chunk_text, q, snip
+                                    ),
+                                }
+                            )
+                            if len(out) >= lim:
+                                return out
+                return out
+
+            out2: List[Dict[str, Any]] = []
+            for row in rows:
+                chunk_text = str(row["chunk_text"] or "")
+                out2.append(
+                    {
+                        "event_id": int(row["event_id"]),
+                        "kind": str(row["kind"] or ""),
+                        "chunk_idx": int(row["chunk_idx"]),
+                        "snippet": self._snippet_around_query(chunk_text, q, snip),
+                    }
+                )
+            return out2
 
     def has_exec_bind(self, cid: str) -> bool:
         cid = (cid or "").strip()

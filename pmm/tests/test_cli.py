@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import fcntl
+
 from pmm.core.event_log import EventLog
 from pmm.core.commitment_manager import CommitmentManager
 from pmm.runtime.cli import (
     RSM_HELP_TEXT,
+    _acquire_db_process_lock,
     _is_hidden_marker_line,
     handle_goals_command,
     handle_rsm_command,
@@ -130,3 +133,13 @@ def test_hidden_marker_line_detects_canonical_tool_json():
         _is_hidden_marker_line('{"tool":"ledger_get","arguments":{"id":35289}}')
         is True
     )
+
+
+def test_acquire_db_process_lock_is_single_holder(tmp_path):
+    db_path = str(tmp_path / "pmm.db")
+    h1 = _acquire_db_process_lock(db_path)
+    assert h1 is not None
+    h2 = _acquire_db_process_lock(db_path)
+    assert h2 is None
+    fcntl.flock(h1.fileno(), fcntl.LOCK_UN)
+    h1.close()
