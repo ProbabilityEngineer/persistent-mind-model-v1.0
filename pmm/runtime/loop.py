@@ -374,6 +374,90 @@ class RuntimeLoop:
             return ("LEDGER_FIND", ledger_find)
         return None
 
+    @staticmethod
+    def _coerce_int(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return None
+            try:
+                return int(raw)
+            except ValueError:
+                return None
+        return None
+
+    def _validate_tool_request(
+        self, tool_name: str, args: Dict[str, Any]
+    ) -> tuple[bool, Dict[str, Any], str | None]:
+        normalized = dict(args or {})
+        if tool_name == "WEB":
+            query = str(normalized.get("query") or "").strip()
+            if not query:
+                return (False, {}, "web_search requires a non-empty 'query' string")
+            normalized["query"] = query
+            limit_raw = normalized.get("limit")
+            if limit_raw is not None:
+                limit_val = self._coerce_int(limit_raw)
+                if limit_val is None or limit_val <= 0:
+                    return (False, {}, "web_search 'limit' must be a positive integer")
+                normalized["limit"] = limit_val
+            return (True, normalized, None)
+
+        if tool_name == "LEDGER_GET":
+            if "id" not in normalized:
+                return (False, {}, "ledger_get requires integer field 'id'")
+            event_id = self._coerce_int(normalized.get("id"))
+            if event_id is None:
+                return (False, {}, "ledger_get 'id' must be an integer")
+            normalized["id"] = event_id
+            max_chars_raw = normalized.get("max_content_chars")
+            if max_chars_raw is not None:
+                max_chars = self._coerce_int(max_chars_raw)
+                if max_chars is None or max_chars <= 0:
+                    return (
+                        False,
+                        {},
+                        "ledger_get 'max_content_chars' must be a positive integer",
+                    )
+                normalized["max_content_chars"] = max_chars
+            return (True, normalized, None)
+
+        if tool_name == "LEDGER_FIND":
+            query = str(normalized.get("query") or "").strip()
+            from_id = normalized.get("from_id")
+            to_id = normalized.get("to_id")
+
+            # Allow empty query only when an ID range is supplied.
+            has_range = from_id is not None or to_id is not None
+            if not query and not has_range:
+                return (
+                    False,
+                    {},
+                    "ledger_find requires non-empty 'query' or a from_id/to_id range",
+                )
+            normalized["query"] = query
+
+            for key in ("from_id", "to_id", "limit", "max_content_chars"):
+                if key not in normalized:
+                    continue
+                coerced = self._coerce_int(normalized.get(key))
+                if coerced is None:
+                    return (False, {}, f"ledger_find '{key}' must be an integer")
+                if key in ("limit", "max_content_chars") and coerced <= 0:
+                    return (
+                        False,
+                        {},
+                        f"ledger_find '{key}' must be a positive integer",
+                    )
+                normalized[key] = coerced
+            return (True, normalized, None)
+
+        return (False, {}, f"unsupported tool '{tool_name}'")
+
     def _looks_like_tool_attempt(self, text: str) -> bool:
         body = text or ""
         if not body.strip():
@@ -668,19 +752,42 @@ class RuntimeLoop:
                 break
 
             tool_name, args = tool_request
-            tool_names_used.append(tool_name)
             tool_rounds += 1
+            ok_tool, normalized_args, tool_err = self._validate_tool_request(
+                tool_name, args
+            )
+            if not ok_tool:
+                tool_parse_errors += 1
+                effective_user_prompt = (
+                    f"{effective_user_prompt}\n\n[TOOL_PROTOCOL_ERROR]\n"
+                    f"Invalid tool call: {tool_err}. "
+                    "Use canonical JSON: "
+                    '{"tool":"ledger_get","arguments":{"id":123}}, '
+                    '{"tool":"ledger_find","arguments":{"query":"...","from_id":1,"to_id":1000,"limit":20}}, '
+                    '{"tool":"web_search","arguments":{"query":"...","provider":"brave","limit":5}}.'
+                )
+                assistant_reply = self.adapter.generate_reply(
+                    system_prompt=system_prompt, user_prompt=effective_user_prompt
+                )
+                t1 = time.perf_counter()
+                continue
+
+            tool_names_used.append(tool_name)
             if tool_name == "WEB":
                 from pmm.runtime.web_search import run_web_search
 
-                query = str(args.get("query") or "").strip()
-                provider = args.get("provider")
-                limit = args.get("limit", 5)
+                query = str(normalized_args.get("query") or "").strip()
+                provider = normalized_args.get("provider")
+                limit = normalized_args.get("limit", 5)
                 tool_payload = run_web_search(query, provider=provider, limit=limit)
                 self.eventlog.append(
                     kind="web_search",
                     content=json.dumps(tool_payload, sort_keys=True, separators=(",", ":")),
-                    meta={"source": "assistant", "trigger": "marker", "request": args},
+                    meta={
+                        "source": "assistant",
+                        "trigger": "marker",
+                        "request": normalized_args,
+                    },
                 )
                 effective_user_prompt = (
                     f"{effective_user_prompt}\n\n[WEB_SEARCH_RESULTS]\n"
@@ -689,9 +796,9 @@ class RuntimeLoop:
             elif tool_name == "LEDGER_GET":
                 from pmm.runtime.ledger_reader import run_ledger_get
 
-                event_id = args.get("id")
-                include_meta = bool(args.get("include_meta", True))
-                max_content_chars = args.get("max_content_chars", 4000)
+                event_id = normalized_args.get("id")
+                include_meta = bool(normalized_args.get("include_meta", True))
+                max_content_chars = normalized_args.get("max_content_chars", 4000)
                 tool_payload = run_ledger_get(
                     self.eventlog,
                     event_id=event_id,
@@ -701,7 +808,11 @@ class RuntimeLoop:
                 self.eventlog.append(
                     kind="ledger_read",
                     content=json.dumps(tool_payload, sort_keys=True, separators=(",", ":")),
-                    meta={"source": "assistant", "trigger": "marker", "request": args},
+                    meta={
+                        "source": "assistant",
+                        "trigger": "marker",
+                        "request": normalized_args,
+                    },
                 )
                 effective_user_prompt = (
                     f"{effective_user_prompt}\n\n[LEDGER_GET_RESULTS]\n"
@@ -712,18 +823,22 @@ class RuntimeLoop:
 
                 tool_payload = run_ledger_find(
                     self.eventlog,
-                    query=args.get("query"),
-                    kind=args.get("kind"),
-                    from_id=args.get("from_id"),
-                    to_id=args.get("to_id"),
-                    limit=args.get("limit", 20),
-                    include_meta=bool(args.get("include_meta", True)),
-                    max_content_chars=args.get("max_content_chars", 2000),
+                    query=normalized_args.get("query"),
+                    kind=normalized_args.get("kind"),
+                    from_id=normalized_args.get("from_id"),
+                    to_id=normalized_args.get("to_id"),
+                    limit=normalized_args.get("limit", 20),
+                    include_meta=bool(normalized_args.get("include_meta", True)),
+                    max_content_chars=normalized_args.get("max_content_chars", 2000),
                 )
                 self.eventlog.append(
                     kind="ledger_search",
                     content=json.dumps(tool_payload, sort_keys=True, separators=(",", ":")),
-                    meta={"source": "assistant", "trigger": "marker", "request": args},
+                    meta={
+                        "source": "assistant",
+                        "trigger": "marker",
+                        "request": normalized_args,
+                    },
                 )
                 effective_user_prompt = (
                     f"{effective_user_prompt}\n\n[LEDGER_FIND_RESULTS]\n"

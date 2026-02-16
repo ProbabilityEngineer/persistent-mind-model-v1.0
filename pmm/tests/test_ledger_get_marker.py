@@ -395,3 +395,41 @@ def test_runtime_loop_reprompts_on_malformed_tool_attempt() -> None:
     assert not reads, "expected malformed tool call to avoid ledger_read"
     assert len(adapter.calls) == 2
     assert "[TOOL_PROTOCOL_ERROR]" in adapter.calls[-1]
+
+
+class CanonicalLedgerGetWrongFieldThenFixAdapter:
+    deterministic_latency_ms = 0
+    model = "test-canonical-ledger-get-wrong-field-then-fix-adapter"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def generate_reply(self, system_prompt: str, user_prompt: str) -> str:
+        self.calls.append(user_prompt)
+        if len(self.calls) == 1:
+            return '{"tool":"ledger_get","arguments":{"event_id":1}}'
+        if len(self.calls) == 2:
+            return '{"tool":"ledger_get","arguments":{"id":1}}'
+        return "Fixed tool call done."
+
+
+def test_runtime_loop_reprompts_when_canonical_ledger_get_uses_event_id() -> None:
+    log = EventLog(":memory:")
+    adapter = CanonicalLedgerGetWrongFieldThenFixAdapter()
+    loop = RuntimeLoop(eventlog=log, adapter=adapter, autonomy=False)
+
+    loop.run_turn("show me event 1")
+
+    events = log.read_all()
+    reads = [e for e in events if e.get("kind") == "ledger_read"]
+    assert reads, "expected a ledger_read event after corrected retry"
+    payload = json.loads(reads[-1]["content"])
+    assert payload["ok"] is True
+    assert payload["id"] == 1
+    assert len(adapter.calls) == 3
+    assert "[TOOL_PROTOCOL_ERROR]" in adapter.calls[1]
+
+    metrics = [e for e in events if e.get("kind") == "metrics_turn"]
+    assert metrics, "expected metrics_turn event"
+    meta = metrics[-1].get("meta") or {}
+    assert int(meta.get("tool_parse_errors", 0)) >= 1
