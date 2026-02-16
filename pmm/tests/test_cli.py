@@ -7,6 +7,7 @@ from pmm.core.event_log import EventLog
 from pmm.core.commitment_manager import CommitmentManager
 from pmm.runtime.cli import (
     RSM_HELP_TEXT,
+    _is_hidden_marker_line,
     handle_goals_command,
     handle_rsm_command,
     handle_graph_command,
@@ -122,3 +123,10 @@ def test_graph_explain_returns_subgraph_for_cid():
     assert "Explanation for task1" in output
     # Should include at least the commitment_open event line.
     assert "commitment_open" in output
+
+
+def test_hidden_marker_line_detects_canonical_tool_json():
+    assert (
+        _is_hidden_marker_line('{"tool":"ledger_get","arguments":{"id":35289}}')
+        is True
+    )

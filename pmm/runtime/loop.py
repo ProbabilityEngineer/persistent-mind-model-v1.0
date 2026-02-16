@@ -473,6 +473,58 @@ class RuntimeLoop:
         )
         return any(h in body for h in hints)
 
+    @staticmethod
+    def _is_canonical_tool_json_line(line: str) -> bool:
+        stripped = (line or "").strip()
+        if not stripped:
+            return False
+        try:
+            parsed = json.loads(stripped)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if not isinstance(parsed, dict):
+            return False
+        return isinstance(parsed.get("tool"), str) and isinstance(
+            parsed.get("arguments"), dict
+        )
+
+    def _is_tool_scaffolding_line(self, line: str) -> bool:
+        stripped = (line or "").strip()
+        if not stripped:
+            return False
+        if self._is_canonical_tool_json_line(stripped):
+            return True
+        tokens = (
+            "WEB:",
+            "LEDGER_GET:",
+            "LEDGER_FIND:",
+            "<minimax:tool_call>",
+            "</minimax:tool_call>",
+            "<invoke name=",
+            "</invoke>",
+            "<parameter name=",
+            "</parameter>",
+            "[TOOL_CALL]",
+            "[/TOOL_CALL]",
+            "{tool =>",
+            "--id ",
+            "--query ",
+            "--kind ",
+            "--from_id ",
+            "--to_id ",
+            "--limit ",
+        )
+        return any(tok in stripped for tok in tokens)
+
+    def _has_visible_non_tool_text(self, text: str) -> bool:
+        body = text or ""
+        if not body.strip():
+            return False
+        visible_lines = [
+            ln for ln in body.splitlines() if not self._is_tool_scaffolding_line(ln)
+        ]
+        return bool("\n".join(visible_lines).strip())
+
     def _extract_claims(self, text: str) -> List[Claim]:
         lines = (text or "").splitlines()
         try:
@@ -728,6 +780,8 @@ class RuntimeLoop:
         max_tool_rounds = 4
         tool_parse_errors = 0
         tool_rounds = 0
+        forced_finalizations = 0
+        forced_fallback = False
         for _ in range(max_tool_rounds):
             tool_request = self._extract_tool_request(assistant_reply)
             if tool_request is None:
@@ -856,6 +910,26 @@ class RuntimeLoop:
                 system_prompt=system_prompt, user_prompt=effective_user_prompt
             )
             t1 = time.perf_counter()
+
+        # 3b. Force a final plain-English answer if model stays in tool-call mode.
+        if tool_rounds > 0 and not self._has_visible_non_tool_text(assistant_reply):
+            for _ in range(2):
+                forced_finalizations += 1
+                effective_user_prompt = (
+                    f"{effective_user_prompt}\n\n[FINAL_ANSWER_REQUIRED]\n"
+                    "Tools are now closed for this turn. Do not call any tool. "
+                    "Output plain English only."
+                )
+                assistant_reply = self.adapter.generate_reply(
+                    system_prompt=system_prompt, user_prompt=effective_user_prompt
+                )
+                t1 = time.perf_counter()
+                if self._has_visible_non_tool_text(assistant_reply):
+                    break
+
+        if not self._has_visible_non_tool_text(assistant_reply):
+            assistant_reply = "retry-ready"
+            forced_fallback = True
 
         # 3d. Try to parse optional structured JSON header (intent/outcome/etc. + concepts).
         #     Expected pattern in test mode: first line is a JSON object, followed
@@ -1031,6 +1105,8 @@ class RuntimeLoop:
                 "tool_name": ",".join(tool_names_unique),
                 "tool_rounds": tool_rounds,
                 "tool_parse_errors": tool_parse_errors,
+                "forced_finalizations": forced_finalizations,
+                "forced_fallback": forced_fallback,
             },
         )
 

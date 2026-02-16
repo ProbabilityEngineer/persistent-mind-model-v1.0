@@ -83,6 +83,14 @@ def _is_hidden_marker_line(line: str) -> bool:
     stripped = (line or "").strip()
     if not stripped:
         return False
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict) and isinstance(parsed.get("tool"), str) and isinstance(
+            parsed.get("arguments"), dict
+        ):
+            return True
+    except (TypeError, json.JSONDecodeError):
+        pass
     tokens = (
         "WEB:",
         "LEDGER_GET:",
