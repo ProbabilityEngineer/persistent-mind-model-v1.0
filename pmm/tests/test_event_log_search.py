@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from pmm.core.event_log import EventLog
@@ -72,3 +73,25 @@ def test_find_matching_chunks_backfills_on_reopen(tmp_path: Path) -> None:
     hits = reopened.find_matching_chunks(query="rare_chunk_phrase", limit=5)
     assert hits
     assert int(hits[0]["event_id"]) >= 1
+
+
+def test_eventlog_init_tolerates_locked_db_during_chunk_backfill(tmp_path: Path) -> None:
+    db_path = tmp_path / "locked_backfill.db"
+    log = EventLog(str(db_path))
+    log.append(
+        kind="assistant_message",
+        content=("alpha " * 80) + "locked_phrase_target" + (" beta" * 80),
+        meta={},
+    )
+
+    locker = sqlite3.connect(str(db_path))
+    reopened = None
+    try:
+        locker.execute("BEGIN EXCLUSIVE")
+        # Should not raise even when chunk backfill can't acquire write lock.
+        reopened = EventLog(str(db_path))
+    finally:
+        locker.rollback()
+        locker.close()
+    assert reopened is not None
+    assert reopened.count() >= 1

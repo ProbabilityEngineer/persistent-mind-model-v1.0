@@ -31,57 +31,71 @@ class EventLog:
     def __init__(self, path: str = ":memory:") -> None:
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout = 1500")
         self._lock = threading.RLock()
         self._listeners: List = []
         self._fts_enabled = False
         self._init_db()
 
     def _init_db(self) -> None:
-        with self._conn:
-            self._conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ts TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    meta TEXT NOT NULL,
-                    prev_hash TEXT,
-                    hash TEXT
-                );
-                """
-            )
-            # Index to support efficient tail queries (ORDER BY id DESC LIMIT ?).
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_events_id_desc ON events(id DESC);"
-            )
-            # Index to support efficient kind-based scans.
-            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_kind ON events(kind);")
-            # Composite and time indexes for deterministic filtered scans.
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_events_kind_id_desc ON events(kind, id DESC);"
-            )
-            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);")
-            # Unique index on hash to support idempotent append with INSERT OR IGNORE.
-            self._conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_hash ON events(hash);"
-            )
-            self._conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS event_chunks (
-                    event_id INTEGER NOT NULL,
-                    chunk_idx INTEGER NOT NULL,
-                    chunk_text TEXT NOT NULL,
-                    PRIMARY KEY (event_id, chunk_idx)
-                );
-                """
-            )
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_event_chunks_event ON event_chunks(event_id);"
-            )
-            self._init_fts()
-            self._backfill_fts()
-            self._backfill_chunks()
+        try:
+            with self._conn:
+                self._conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        meta TEXT NOT NULL,
+                        prev_hash TEXT,
+                        hash TEXT
+                    );
+                    """
+                )
+                # Index to support efficient tail queries (ORDER BY id DESC LIMIT ?).
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_events_id_desc ON events(id DESC);"
+                )
+                # Index to support efficient kind-based scans.
+                self._conn.execute("CREATE INDEX IF NOT EXISTS idx_kind ON events(kind);")
+                # Composite and time indexes for deterministic filtered scans.
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_events_kind_id_desc ON events(kind, id DESC);"
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);"
+                )
+                # Unique index on hash to support idempotent append with INSERT OR IGNORE.
+                self._conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_hash ON events(hash);"
+                )
+                self._conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS event_chunks (
+                        event_id INTEGER NOT NULL,
+                        chunk_idx INTEGER NOT NULL,
+                        chunk_text TEXT NOT NULL,
+                        PRIMARY KEY (event_id, chunk_idx)
+                    );
+                    """
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_event_chunks_event ON event_chunks(event_id);"
+                )
+                self._init_fts()
+                self._backfill_fts()
+                # Keep startup responsive on large ledgers; backfill incrementally.
+                try:
+                    self._backfill_chunks(batch_size=300, max_batches=1)
+                except sqlite3.OperationalError:
+                    # Fail-open when another process holds a write lock.
+                    pass
+        except sqlite3.OperationalError as exc:
+            # Fail-open on lock contention from another active process.
+            if "locked" in str(exc).lower():
+                return
+            raise
 
     @staticmethod
     def _row_to_event(row: sqlite3.Row) -> Dict[str, Any]:
@@ -196,8 +210,11 @@ class EventLog:
         right = min(len(src), left + max_chars)
         return src[left:right]
 
-    def _backfill_chunks(self, batch_size: int = 500) -> None:
+    def _backfill_chunks(self, batch_size: int = 500, max_batches: int = 1) -> None:
+        batches = 0
         while True:
+            if batches >= max(1, int(max_batches)):
+                break
             cur = self._conn.execute(
                 """
                 SELECT e.id, e.content
@@ -213,9 +230,14 @@ class EventLog:
             if not rows:
                 break
             for row in rows:
-                self._index_chunks_for_event(
-                    int(row["id"]), str(row["content"] or ""), replace=False
-                )
+                try:
+                    self._index_chunks_for_event(
+                        int(row["id"]), str(row["content"] or ""), replace=False
+                    )
+                except sqlite3.OperationalError:
+                    # Another process may own a lock; defer to a future startup.
+                    return
+            batches += 1
 
     def _index_event_for_search(
         self, event_id: int, kind: str, content: str, meta: Dict[str, Any]
@@ -793,24 +815,25 @@ class EventLog:
                     rows = []
 
             if not rows:
-                # Fallback path without FTS.
-                like = q.lower()
-                sql = (
-                    "SELECT e.id, e.kind, e.content FROM events e WHERE 1=1"
-                    f"{where_sql} ORDER BY e.id DESC LIMIT ?"
+                # Fallback path: use full-event search and derive matching chunks
+                # at query time (works even before chunk backfill completes).
+                fallback_rows = self.find_entries(
+                    query=q,
+                    kind=kind_val or None,
+                    start_id=start_id,
+                    end_id=end_id,
+                    limit=max(lim * 3, lim),
                 )
-                cur = self._conn.execute(sql, [*params, max(lim * 3, lim)])
-                fallback_rows = cur.fetchall()
                 out: List[Dict[str, Any]] = []
                 for row in fallback_rows:
                     event_id = int(row["id"])
-                    chunks = self._split_content_chunks(str(row["content"] or ""))
+                    chunks = self._split_content_chunks(str(row.get("content") or ""))
                     for idx, chunk_text in enumerate(chunks):
-                        if like in chunk_text.lower():
+                        if q.lower() in chunk_text.lower():
                             out.append(
                                 {
                                     "event_id": event_id,
-                                    "kind": str(row["kind"] or ""),
+                                    "kind": str(row.get("kind") or ""),
                                     "chunk_idx": idx,
                                     "snippet": self._snippet_around_query(
                                         chunk_text, q, snip
