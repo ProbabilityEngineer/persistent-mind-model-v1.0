@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Dict, List, Optional
@@ -455,39 +456,59 @@ class EventLog:
                 # Fail-open if policy unreadable
                 pass
 
-        with self._lock, self._conn:
-            # Idempotent append using UNIQUE(hash) and INSERT OR IGNORE:
-            # - On first insert, a new row is created.
-            # - On conflict, no new row is created; we look up the existing row
-            #   and emit it to listeners, returning its id.
-            cur = self._conn.execute(
-                "INSERT OR IGNORE INTO events (ts, kind, content, meta, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?)",
-                (ts, kind, content, _canonical_json(meta), prev_hash, digest),
-            )
-            if cur.rowcount == 0:
-                # Row with identical hash already exists; fetch canonical row.
-                cur_row = self._conn.execute(
-                    "SELECT id, ts, kind, content, meta, prev_hash, hash FROM events WHERE hash = ?",
-                    (digest,),
-                )
-                row = cur_row.fetchone()
-                if row is None:
-                    raise RuntimeError("Invariant violation: hash conflict without row")
-                ev_id = int(row["id"])
-                ts_db = row["ts"]
-                kind_db = row["kind"]
-                content_db = row["content"]
-                meta_db = json.loads(row["meta"] or "{}")
-                prev_hash_db = row["prev_hash"]
-                hash_db = row["hash"]
-            else:
-                ev_id = int(cur.lastrowid)
-                ts_db = ts
-                kind_db = kind
-                content_db = content
-                meta_db = meta
-                prev_hash_db = prev_hash
-                hash_db = digest
+        max_retries = 6
+        for attempt in range(max_retries):
+            # Recompute prev_hash/digest on each write attempt so hash-chain remains
+            # canonical if another writer appended while we were waiting.
+            prev_hash = self._last_hash()
+            payload = {
+                "kind": kind,
+                "content": content,
+                "meta": meta,
+                "prev_hash": prev_hash,
+            }
+            digest = sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+            try:
+                with self._lock, self._conn:
+                    # Idempotent append using UNIQUE(hash) and INSERT OR IGNORE:
+                    # - On first insert, a new row is created.
+                    # - On conflict, no new row is created; we look up the existing row
+                    #   and emit it to listeners, returning its id.
+                    cur = self._conn.execute(
+                        "INSERT OR IGNORE INTO events (ts, kind, content, meta, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?)",
+                        (ts, kind, content, _canonical_json(meta), prev_hash, digest),
+                    )
+                    if cur.rowcount == 0:
+                        # Row with identical hash already exists; fetch canonical row.
+                        cur_row = self._conn.execute(
+                            "SELECT id, ts, kind, content, meta, prev_hash, hash FROM events WHERE hash = ?",
+                            (digest,),
+                        )
+                        row = cur_row.fetchone()
+                        if row is None:
+                            raise RuntimeError(
+                                "Invariant violation: hash conflict without row"
+                            )
+                        ev_id = int(row["id"])
+                        ts_db = row["ts"]
+                        kind_db = row["kind"]
+                        content_db = row["content"]
+                        meta_db = json.loads(row["meta"] or "{}")
+                        prev_hash_db = row["prev_hash"]
+                        hash_db = row["hash"]
+                    else:
+                        ev_id = int(cur.lastrowid)
+                        ts_db = ts
+                        kind_db = kind
+                        content_db = content
+                        meta_db = meta
+                        prev_hash_db = prev_hash
+                        hash_db = digest
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == max_retries - 1:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
 
         ev = {
             "id": ev_id,
@@ -498,8 +519,12 @@ class EventLog:
             "prev_hash": prev_hash_db,
             "hash": hash_db,
         }
-        with self._lock, self._conn:
-            self._index_event_for_search(ev_id, kind_db, content_db, meta_db)
+        try:
+            with self._lock, self._conn:
+                self._index_event_for_search(ev_id, kind_db, content_db, meta_db)
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
         self._emit(ev)
         return ev_id
 
