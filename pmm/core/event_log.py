@@ -30,9 +30,9 @@ class EventLog:
     """Persistent append-only log of events with hash chaining."""
 
     def __init__(self, path: str = ":memory:") -> None:
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn = sqlite3.connect(path, check_same_thread=False, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA busy_timeout = 1500")
+        self._conn.execute("PRAGMA busy_timeout = 30000")
         self._lock = threading.RLock()
         self._listeners: List = []
         self._fts_enabled = False
@@ -41,6 +41,10 @@ class EventLog:
     def _init_db(self) -> None:
         try:
             with self._conn:
+                try:
+                    self._conn.execute("PRAGMA journal_mode = WAL")
+                except sqlite3.OperationalError:
+                    pass
                 self._conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS events (

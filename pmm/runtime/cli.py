@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import atexit
+import fcntl
 from typing import Dict, Optional
 
 from pmm.core.event_log import EventLog
@@ -77,6 +79,29 @@ def _read_file_text(path: str) -> str:
             return f.read().strip()
     except Exception:
         return ""
+
+
+def _acquire_db_process_lock(db_path: str):
+    lock_path = f"{db_path}.lock"
+    fh = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+
+    def _release() -> None:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+    atexit.register(_release)
+    return fh
 
 
 def _is_hidden_marker_line(line: str) -> bool:
@@ -399,6 +424,15 @@ def main() -> None:  # pragma: no cover - thin wrapper
     except Exception:
         pass
     db_path = str(canonical)
+    lock_handle = _acquire_db_process_lock(db_path)
+    if lock_handle is None:
+        console.print(
+            "[error]Another PMM CLI process is already using this ledger database.[/error]"
+        )
+        console.print(
+            "[prompt]Close the other process (or use /exit there) and retry.[/prompt]"
+        )
+        return
 
     # Load .env if present (for OPENAI_API_KEY/OPENAI_MODEL etc.)
     try:  # optional dependency; safe if missing
