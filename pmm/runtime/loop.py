@@ -1057,6 +1057,17 @@ class RuntimeLoop:
                 model=model,
                 dims=dims,
             )
+            # Periodic backfill for older events using current embedding model.
+            # This gradually refreshes coverage after model/dims changes.
+            try:
+                batch = int(retrieval_cfg.get("backfill_batch", 24))
+            except (TypeError, ValueError):
+                batch = 24
+            if batch > 0:
+                try:
+                    self.indexer.backfill_embeddings(model=model, dims=dims, batch=batch)
+                except Exception:
+                    pass
 
         # 4a. Parse REF: lines and append inter_ledger_ref events
         self._parse_ref_lines(assistant_reply)

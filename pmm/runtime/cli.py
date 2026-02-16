@@ -852,7 +852,7 @@ def handle_pm_command(command: str, eventlog: EventLog) -> Optional[str]:
                 "type": "retrieval",
                 "strategy": "vector",
                 "limit": 5,
-                "model": "hash64",
+                "model": "hash64_tfidf",
                 "dims": 64,
                 "quant": "none",
             }

@@ -304,7 +304,7 @@ class AutonomyKernel:
             "type": "retrieval",
             "strategy": "vector",
             "limit": 7,
-            "model": "hash64",
+            "model": "hash64_tfidf",
             "dims": 64,
             "quant": "none",
         }

@@ -75,3 +75,40 @@ def test_retrieval_selection_recorded_and_consistent():
     )
     # The new pipeline expands IDs via Graph/CTL; ensure there is overlap with vector picks.
     assert set(ids) & set(selected_ids)
+
+
+def test_runtime_loop_periodically_backfills_embeddings_for_current_model() -> None:
+    log = EventLog(":memory:")
+    # Seed old messages that predate current run and have no embeddings.
+    old_ids = []
+    for i in range(6):
+        old_ids.append(log.append(kind="user_message", content=f"legacy note {i}", meta={}))
+        old_ids.append(
+            log.append(kind="assistant_message", content=f"legacy reply {i}", meta={})
+        )
+
+    # Configure stronger embedding model and small backfill batch.
+    cfg = {
+        "type": "retrieval",
+        "strategy": "vector",
+        "limit": 10,
+        "model": "hash64_tfidf",
+        "dims": 32,
+        "quant": "none",
+        "backfill_batch": 20,
+    }
+    log.append(kind="config", content=json.dumps(cfg, separators=(",", ":")), meta={})
+
+    loop = RuntimeLoop(eventlog=log, adapter=DummyAdapter(), replay=False)
+    loop.run_turn("please analyze legacy notes")
+
+    emb_events = [
+        e
+        for e in log.read_by_kind("embedding_add")
+        if e.get("meta", {}).get("source") == "indexer.backfill"
+    ]
+    assert emb_events, "expected periodic indexer backfill embeddings"
+    # At least one old event should be backfilled for current model.
+    payloads = [json.loads(e.get("content") or "{}") for e in emb_events]
+    backfilled_ids = {int(p.get("event_id", 0)) for p in payloads}
+    assert any(eid in backfilled_ids for eid in old_ids)
