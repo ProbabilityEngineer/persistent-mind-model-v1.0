@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from pmm.core.event_log import EventLog
 from pmm.core.concept_graph import ConceptGraph
 from pmm.core.meme_graph import MemeGraph
+from pmm.retrieval.query_rewrite import build_query_variants
 from pmm.retrieval.vector import select_by_vector, select_by_concepts
 
 
@@ -221,34 +222,46 @@ def run_retrieval_pipeline(
     keyword_event_scores: Dict[int, float] = {}
 
     if config.enable_hybrid_scoring and query_text.strip():
-        chunk_hits = eventlog.find_matching_chunks(
-            query=query_text.strip(),
-            limit=min(max(1, int(config.vector_candidate_cap)), 100),
-        )
-        chunk_counts: Dict[int, int] = {}
-        for hit in chunk_hits:
-            try:
-                eid = int(hit.get("event_id", 0))
-            except Exception:
-                continue
-            if eid <= 0:
-                continue
-            chunk_counts[eid] = chunk_counts.get(eid, 0) + 1
-        for eid, count in chunk_counts.items():
-            # Base keyword weight with a small bonus for multiple matched chunks.
-            keyword_event_scores[eid] = min(1.5, 1.0 + 0.1 * max(0, count - 1))
+        query_variants = build_query_variants(query_text, limit=8)
+        if not query_variants:
+            query_variants = [query_text.strip()]
 
-        keyword_hits = eventlog.find_entries(
-            query=query_text.strip(),
-            limit=min(max(1, int(config.vector_candidate_cap)), 50),
-        )
-        for ev in keyword_hits:
-            try:
-                eid = int(ev.get("id", 0))
-            except Exception:
-                continue
-            if eid > 0:
-                keyword_event_scores[eid] = max(keyword_event_scores.get(eid, 0.0), 1.0)
+        for idx, qv in enumerate(query_variants):
+            # Earlier variants are stronger signals.
+            variant_weight = max(0.5, 1.0 - (0.1 * idx))
+            chunk_hits = eventlog.find_matching_chunks(
+                query=qv,
+                limit=min(max(1, int(config.vector_candidate_cap)), 100),
+            )
+            chunk_counts: Dict[int, int] = {}
+            for hit in chunk_hits:
+                try:
+                    eid = int(hit.get("event_id", 0))
+                except Exception:
+                    continue
+                if eid <= 0:
+                    continue
+                chunk_counts[eid] = chunk_counts.get(eid, 0) + 1
+            for eid, count in chunk_counts.items():
+                # Base keyword weight with a small bonus for multiple matched chunks.
+                score = min(1.5, 1.0 + 0.1 * max(0, count - 1))
+                score *= variant_weight
+                keyword_event_scores[eid] = max(keyword_event_scores.get(eid, 0.0), score)
+
+            keyword_hits = eventlog.find_entries(
+                query=qv,
+                limit=min(max(1, int(config.vector_candidate_cap)), 50),
+            )
+            for ev in keyword_hits:
+                try:
+                    eid = int(ev.get("id", 0))
+                except Exception:
+                    continue
+                if eid > 0:
+                    keyword_event_scores[eid] = max(
+                        keyword_event_scores.get(eid, 0.0),
+                        1.0 * variant_weight,
+                    )
 
     # Vector stage becomes a refiner over already selected slices only
     def _refine_with_vector(
