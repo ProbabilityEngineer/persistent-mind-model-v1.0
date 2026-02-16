@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from pmm.core.event_log import EventLog
 from pmm.core.concept_graph import ConceptGraph
@@ -59,6 +59,10 @@ class RetrievalConfig:
     # Whether to perform vector search
     enable_vector_search: bool = True
     enable_summary_vector_search: bool = True
+    enable_hybrid_scoring: bool = False
+    hybrid_keyword_weight: float = 0.45
+    hybrid_vector_weight: float = 0.45
+    hybrid_recency_weight: float = 0.10
 
 
 @dataclass
@@ -210,28 +214,50 @@ def run_retrieval_pipeline(
 
     # 3. Vector Selection
     vector_event_ids: Set[int] = set()
+    vector_event_scores: Dict[int, float] = {}
     summary_vector_ids: Set[int] = set()
     summary_expanded_ids: Set[int] = set()
     summary_pinned_ids: Set[int] = set()
+    keyword_event_scores: Dict[int, float] = {}
+
+    if config.enable_hybrid_scoring and query_text.strip():
+        keyword_hits = eventlog.find_entries(
+            query=query_text.strip(),
+            limit=min(max(1, int(config.vector_candidate_cap)), 50),
+        )
+        for ev in keyword_hits:
+            try:
+                eid = int(ev.get("id", 0))
+            except Exception:
+                continue
+            if eid > 0:
+                keyword_event_scores[eid] = 1.0
 
     # Vector stage becomes a refiner over already selected slices only
-    def _refine_with_vector(candidate_ids: Set[int], limit: int) -> Set[int]:
+    def _refine_with_vector(
+        candidate_ids: Set[int], limit: int
+    ) -> Tuple[Set[int], Dict[int, float]]:
         if not config.enable_vector_search or not query_text:
-            return set()
+            return set(), {}
         if not candidate_ids:
-            return set()
+            return set(), {}
         events_data: List[Dict] = []
         for eid in sorted(candidate_ids):
             ev = eventlog.get(int(eid)) or {}
             ev["id"] = int(eid)
             events_data.append(ev)
-        vec_ids, _ = select_by_vector(
+        vec_ids, vec_scores = select_by_vector(
             events=events_data,
             query_text=query_text,
             limit=min(limit, len(events_data)),
             cap=len(events_data),
         )
-        return set(vec_ids)
+        score_map: Dict[int, float] = {}
+        for idx, eid in enumerate(vec_ids):
+            if idx >= len(vec_scores):
+                continue
+            score_map[int(eid)] = float(vec_scores[idx])
+        return set(vec_ids), score_map
 
     # 3a. Thread-first selection (concept -> CID -> slices)
     thread_expanded_ids: Set[int] = set()
@@ -242,11 +268,12 @@ def run_retrieval_pipeline(
 
     # 3b. Optional vector refinement over thread slices
     if config.enable_vector_search and query_text:
-        refined_ids = _refine_with_vector(
+        refined_ids, refined_scores = _refine_with_vector(
             thread_expanded_ids.union(ctl_event_ids).union(sticky_event_ids),
             config.limit_vector_events,
         )
         vector_event_ids.update(refined_ids)
+        vector_event_scores.update(refined_scores)
 
     # 3c. Summary vector search (unchanged but bounded to summaries)
     if (
@@ -265,7 +292,7 @@ def run_retrieval_pipeline(
             )
         summary_events = sorted(summary_events, key=lambda ev: int(ev.get("id", 0)))
         if summary_events:
-            s_vec_ids, _ = select_by_vector(
+            s_vec_ids, s_scores = select_by_vector(
                 events=summary_events,
                 query_text=query_text,
                 limit=config.summary_vector_limit,
@@ -273,6 +300,10 @@ def run_retrieval_pipeline(
                 cap=len(summary_events),
             )
             summary_vector_ids.update(s_vec_ids)
+            for idx, eid in enumerate(s_vec_ids):
+                if idx >= len(s_scores):
+                    continue
+                vector_event_scores[int(eid)] = float(s_scores[idx])
             summary_expanded_ids.update(summary_vector_ids)
             for sid in s_vec_ids:
                 ev = eventlog.get(sid) or {}
@@ -385,12 +416,16 @@ def run_retrieval_pipeline(
 
     # 5. Finalize
     # Bucketed allocation: pinned (forced+sticky) > concept > thread > summary > vector > residual
-    forced_sorted = sorted(forced_event_ids, reverse=True)
-    sticky_sorted = [
-        eid
-        for eid in sorted(sticky_event_ids, reverse=True)
-        if eid not in forced_event_ids
-    ]
+    forced_sorted = []
+    if not config.enable_hybrid_scoring:
+        forced_sorted = sorted(forced_event_ids, reverse=True)
+    sticky_sorted = []
+    if not config.enable_hybrid_scoring:
+        sticky_sorted = [
+            eid
+            for eid in sorted(sticky_event_ids, reverse=True)
+            if eid not in forced_event_ids
+        ]
     summary_sorted = [
         eid
         for eid in sorted(summary_pinned_ids, reverse=True)
@@ -408,28 +443,69 @@ def run_retrieval_pipeline(
         expanded_ids - pinned_set - concept_set - thread_set - summary_set - vector_set
     )
 
-    concept_bucket = sorted(concept_set, reverse=True)
-    thread_bucket = sorted(thread_set, reverse=True)
-    summary_bucket = sorted(summary_set, reverse=True)
-    vector_bucket = sorted(vector_set, reverse=True)
-    residual_bucket = sorted(residual_set, reverse=True)
-
     final_ids = list(pinned_ids)
     remaining = max(limit_total_events - len(final_ids), 0)
 
-    def _take(bucket: List[int]) -> None:
-        nonlocal remaining
-        if remaining <= 0:
-            return
-        take = bucket[:remaining]
-        final_ids.extend(take)
-        remaining -= len(take)
+    if config.enable_hybrid_scoring:
+        candidates = (
+            concept_set.union(thread_set)
+            .union(summary_set)
+            .union(vector_set)
+            .union(residual_set)
+        )
 
-    _take(concept_bucket)
-    _take(thread_bucket)
-    _take(summary_bucket)
-    _take(vector_bucket)
-    _take(residual_bucket)
+        max_event_id = max(total_events, 1)
+        kw_w = float(config.hybrid_keyword_weight)
+        vec_w = float(config.hybrid_vector_weight)
+        rec_w = float(config.hybrid_recency_weight)
+
+        def _recency_norm(eid: int) -> float:
+            return max(0.0, min(1.0, float(eid) / float(max_event_id)))
+
+        def _source_boost(eid: int) -> float:
+            boost = 0.0
+            if eid in forced_event_ids:
+                boost += 0.25
+            if eid in sticky_event_ids:
+                boost += 0.10
+            if eid in concept_set:
+                boost += 0.20
+            if eid in thread_set:
+                boost += 0.15
+            if eid in summary_set:
+                boost += 0.12
+            if eid in vector_set:
+                boost += 0.18
+            return boost
+
+        def _hybrid_score(eid: int) -> float:
+            kw = keyword_event_scores.get(eid, 0.0)
+            vec = max(0.0, vector_event_scores.get(eid, 0.0))
+            rec = _recency_norm(eid)
+            return (kw_w * kw) + (vec_w * vec) + (rec_w * rec) + _source_boost(eid)
+
+        ranked = sorted(candidates, key=lambda eid: (-_hybrid_score(eid), -eid))
+        final_ids.extend(ranked[:remaining])
+    else:
+        concept_bucket = sorted(concept_set, reverse=True)
+        thread_bucket = sorted(thread_set, reverse=True)
+        summary_bucket = sorted(summary_set, reverse=True)
+        vector_bucket = sorted(vector_set, reverse=True)
+        residual_bucket = sorted(residual_set, reverse=True)
+
+        def _take(bucket: List[int]) -> None:
+            nonlocal remaining
+            if remaining <= 0:
+                return
+            take = bucket[:remaining]
+            final_ids.extend(take)
+            remaining -= len(take)
+
+        _take(concept_bucket)
+        _take(thread_bucket)
+        _take(summary_bucket)
+        _take(vector_bucket)
+        _take(residual_bucket)
 
     # For active_concepts, we return the seed concepts.
     # We could also verify which concepts are actually present in the final selection.
