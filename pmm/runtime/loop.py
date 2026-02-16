@@ -709,6 +709,9 @@ class RuntimeLoop:
 
             if retrieval_cfg.get("strategy") == "vector":
                 pipeline_config.enable_vector_search = True
+                pipeline_config.enable_hybrid_scoring = bool(
+                    retrieval_cfg.get("hybrid_scoring", True)
+                )
             elif retrieval_cfg.get("strategy") == "fixed":
                 # "fixed" implies relying on limit, usually no vector?
                 # But fixed means "fixed window".
@@ -718,6 +721,9 @@ class RuntimeLoop:
                 # So we can interpret "fixed" as just limiting size but still using concepts.
                 # Or we can disable vector search for fixed.
                 pipeline_config.enable_vector_search = False
+                pipeline_config.enable_hybrid_scoring = bool(
+                    retrieval_cfg.get("hybrid_scoring", False)
+                )
 
         user_event = self.eventlog.get(user_event_id)
 
