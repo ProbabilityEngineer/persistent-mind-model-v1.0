@@ -81,23 +81,36 @@ def _read_file_text(path: str) -> str:
 
 def _is_hidden_marker_line(line: str) -> bool:
     stripped = (line or "").strip()
-    return (
-        stripped.startswith("WEB:")
-        or stripped.startswith("LEDGER_GET:")
-        or stripped.startswith("LEDGER_FIND:")
-        or stripped.startswith("<minimax:tool_call>")
-        or stripped.startswith("</minimax:tool_call>")
-        or stripped.startswith("<invoke name=\"LEDGER_GET\">")
-        or stripped.startswith("<invoke name=\"LEDGER_FIND\">")
-        or stripped.startswith("</invoke>")
-        or stripped.startswith("<parameter name=\"id\">")
-        or stripped.startswith("<parameter name=\"query\">")
-        or stripped.startswith("<parameter name=\"kind\">")
-        or stripped.startswith("<parameter name=\"from_id\">")
-        or stripped.startswith("<parameter name=\"to_id\">")
-        or stripped.startswith("<parameter name=\"limit\">")
-        or stripped.startswith("</parameter>")
+    if not stripped:
+        return False
+    tokens = (
+        "WEB:",
+        "LEDGER_GET:",
+        "LEDGER_FIND:",
+        "<minimax:tool_call>",
+        "</minimax:tool_call>",
+        "<invoke name=\"WEB\">",
+        "<invoke name=\"LEDGER_GET\">",
+        "<invoke name=\"LEDGER_FIND\">",
+        "</invoke>",
+        "<parameter name=\"id\">",
+        "<parameter name=\"query\">",
+        "<parameter name=\"kind\">",
+        "<parameter name=\"from_id\">",
+        "<parameter name=\"to_id\">",
+        "<parameter name=\"limit\">",
+        "</parameter>",
+        "[TOOL_CALL]",
+        "[/TOOL_CALL]",
+        "{tool =>",
+        "--id ",
+        "--query ",
+        "--kind ",
+        "--from_id ",
+        "--to_id ",
+        "--limit ",
     )
+    return any(tok in stripped for tok in tokens)
 
 
 def _format_web_results(payload: Dict[str, object]) -> str:
@@ -448,7 +461,7 @@ def main() -> None:  # pragma: no cover - thin wrapper
             # In-session commands (no CLI flags)
             raw_cmd = user.strip()
             cmd = raw_cmd.lower()
-            if cmd == "/help":
+            if cmd in {"/help", "/commands"}:
                 console.print(_build_commands_table())
                 continue
             if cmd.startswith("/rsm"):
@@ -606,6 +619,12 @@ def main() -> None:  # pragma: no cover - thin wrapper
                 except Exception:
                     pass
                 console.print(_format_web_results(payload))
+                continue
+            if raw_cmd.startswith("/"):
+                console.print(
+                    f"[error]Unknown command: {raw_cmd}[/error]\n"
+                    "[prompt]Use /help to list available commands.[/prompt]"
+                )
                 continue
 
             try:

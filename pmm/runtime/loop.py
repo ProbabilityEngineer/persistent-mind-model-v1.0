@@ -159,7 +159,8 @@ class RuntimeLoop:
         return extract_reflect(lines)
 
     def _extract_web_request(self, text: str) -> Dict[str, Any] | None:
-        lines = (text or "").splitlines()
+        body = text or ""
+        lines = body.splitlines()
         for ln in lines:
             stripped = (ln or "").strip()
             if not stripped.startswith("WEB:"):
@@ -173,6 +174,30 @@ class RuntimeLoop:
                     return parsed
             except json.JSONDecodeError:
                 return {"query": payload}
+        # Bracket tool-call dialect:
+        # [TOOL_CALL]
+        # {tool => "WEB", args => { --query "..." --provider brave --limit 5 }}
+        # [/TOOL_CALL]
+        if 'tool => "WEB"' in body:
+            req: Dict[str, Any] = {}
+            for key in ("query", "provider", "limit"):
+                match = re.search(
+                    rf"--{key}\s+([^\n\r\}}]+)",
+                    body,
+                    flags=re.DOTALL,
+                )
+                if not match:
+                    continue
+                raw_val = match.group(1).strip().strip('"').strip("'")
+                if key == "limit":
+                    try:
+                        req[key] = int(raw_val)
+                    except ValueError:
+                        req[key] = raw_val
+                else:
+                    req[key] = raw_val
+            if req:
+                return req
         return None
 
     def _extract_ledger_get_request(self, text: str) -> Dict[str, Any] | None:
@@ -208,6 +233,17 @@ class RuntimeLoop:
                     return {"id": int(raw_id)}
                 except ValueError:
                     return {"id": raw_id}
+        # Bracket tool-call dialect:
+        # [TOOL_CALL]
+        # {tool => "LEDGER_GET", args => { --id 123 }}
+        # [/TOOL_CALL]
+        if 'tool => "LEDGER_GET"' in body:
+            match = re.search(r"--id\s+([0-9]+)", body, flags=re.DOTALL)
+            if match:
+                try:
+                    return {"id": int(match.group(1))}
+                except ValueError:
+                    pass
         return None
 
     def _extract_ledger_find_request(self, text: str) -> Dict[str, Any] | None:
@@ -247,6 +283,27 @@ class RuntimeLoop:
                     req[key] = raw_val
             if req:
                 return req
+        # Bracket tool-call dialect with flag-style args.
+        if 'tool => "LEDGER_FIND"' in body:
+            req2: Dict[str, Any] = {}
+            for key in ("query", "kind", "from_id", "to_id", "limit"):
+                match = re.search(
+                    rf"--{key}\s+([^\n\r\}}]+)",
+                    body,
+                    flags=re.DOTALL,
+                )
+                if not match:
+                    continue
+                raw_val = match.group(1).strip().strip('"').strip("'")
+                if key in ("from_id", "to_id", "limit"):
+                    try:
+                        req2[key] = int(raw_val)
+                    except ValueError:
+                        req2[key] = raw_val
+                else:
+                    req2[key] = raw_val
+            if req2:
+                return req2
 
         # Fallback: bare JSON object in model output (no marker prefix).
         # Accept only if it looks like a ledger-find payload to avoid

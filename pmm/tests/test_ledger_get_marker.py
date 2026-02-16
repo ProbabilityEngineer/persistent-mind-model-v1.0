@@ -228,3 +228,72 @@ def test_runtime_loop_handles_bare_json_style_ledger_find_payload() -> None:
     payload = json.loads(searches[-1]["content"])
     assert payload["ok"] is True
     assert "[LEDGER_FIND_RESULTS]" in adapter.calls[-1]
+
+
+class LedgerGetBracketAdapter:
+    deterministic_latency_ms = 0
+    model = "test-ledger-get-bracket-adapter"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def generate_reply(self, system_prompt: str, user_prompt: str) -> str:
+        self.calls.append(user_prompt)
+        if len(self.calls) == 1:
+            return (
+                "[TOOL_CALL]\n"
+                '{tool => "LEDGER_GET", args => {\n'
+                "  --id 1\n"
+                "}}\n"
+                "[/TOOL_CALL]"
+            )
+        return "Bracket get done.\nCOMMIT: ok"
+
+
+def test_runtime_loop_handles_bracket_style_ledger_get_marker() -> None:
+    log = EventLog(":memory:")
+    adapter = LedgerGetBracketAdapter()
+    loop = RuntimeLoop(eventlog=log, adapter=adapter, autonomy=False)
+
+    loop.run_turn("show me event 1")
+
+    events = log.read_all()
+    reads = [e for e in events if e.get("kind") == "ledger_read"]
+    assert reads, "expected a ledger_read event"
+
+
+class LedgerFindBracketAdapter:
+    deterministic_latency_ms = 0
+    model = "test-ledger-find-bracket-adapter"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def generate_reply(self, system_prompt: str, user_prompt: str) -> str:
+        self.calls.append(user_prompt)
+        if len(self.calls) == 1:
+            return (
+                "[TOOL_CALL]\n"
+                '{tool => "LEDGER_FIND", args => {\n'
+                '  --query "identity"\n'
+                '  --kind "claim"\n'
+                "  --from_id 1\n"
+                "  --to_id 100\n"
+                "  --limit 5\n"
+                "}}\n"
+                "[/TOOL_CALL]"
+            )
+        return "Bracket find done.\nCOMMIT: ok"
+
+
+def test_runtime_loop_handles_bracket_style_ledger_find_marker() -> None:
+    log = EventLog(":memory:")
+    log.append(kind="claim", content="identity coherence improved", meta={})
+    adapter = LedgerFindBracketAdapter()
+    loop = RuntimeLoop(eventlog=log, adapter=adapter, autonomy=False)
+
+    loop.run_turn("find identity claims")
+
+    events = log.read_all()
+    searches = [e for e in events if e.get("kind") == "ledger_search"]
+    assert searches, "expected a ledger_search event"
