@@ -78,10 +78,26 @@ MARKER_INSTRUCTIONS = (
 
 TOOL_CATALOG = (
     "Tool catalog (use only when needed):\n"
+    "Preferred canonical tool-call format (single JSON object):\n"
+    '{"tool":"web_search","arguments":{"query":"...","provider":"brave","limit":5}}\n'
+    '{"tool":"ledger_get","arguments":{"id":123}}\n'
+    '{"tool":"ledger_find","arguments":{"query":"...","kind":"claim","from_id":1,"to_id":1000,"limit":20}}\n'
+    "Legacy marker format is also accepted:\n"
     '- WEB: {"query":"...","provider":"brave","limit":5}\n'
     '- LEDGER_GET: {"id":123}\n'
     '- LEDGER_FIND: {"query":"...","kind":"claim","from_id":1,"to_id":1000,"limit":20}\n'
     "After tool results arrive, finish with plain-English prose."
+)
+
+TOOL_FEW_SHOTS = (
+    "Tool-use examples:\n"
+    "User asks: 'what is in event 35289?'\n"
+    'Assistant tool call: {"tool":"ledger_get","arguments":{"id":35289}}\n'
+    "Assistant final: plain-English summary of that event.\n"
+    "\n"
+    "User asks: 'find identity claims from Jan 2026 range'\n"
+    'Assistant tool call: {"tool":"ledger_find","arguments":{"query":"identity","kind":"claim","from_id":1,"to_id":999999,"limit":20}}\n'
+    "Assistant final: plain-English synthesis with cited IDs."
 )
 
 JSON_HEADER_GUIDANCE = (
@@ -143,6 +159,7 @@ def compose_system_prompt(
 
     # ── Mechanical scaffolding (must be present for the runtime) ─────────
     parts.append(TOOL_CATALOG)
+    parts.append(TOOL_FEW_SHOTS)
     parts.append(MARKER_INSTRUCTIONS)
     parts.append(
         "Write a rich, natural-language response to the user first. "

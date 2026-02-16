@@ -297,3 +297,101 @@ def test_runtime_loop_handles_bracket_style_ledger_find_marker() -> None:
     events = log.read_all()
     searches = [e for e in events if e.get("kind") == "ledger_search"]
     assert searches, "expected a ledger_search event"
+
+
+class CanonicalLedgerGetAdapter:
+    deterministic_latency_ms = 0
+    model = "test-canonical-ledger-get-adapter"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def generate_reply(self, system_prompt: str, user_prompt: str) -> str:
+        self.calls.append(user_prompt)
+        if len(self.calls) == 1:
+            return '{"tool":"ledger_get","arguments":{"id":1}}'
+        return "Canonical get done.\nCOMMIT: ok"
+
+
+def test_runtime_loop_handles_canonical_json_ledger_get() -> None:
+    log = EventLog(":memory:")
+    adapter = CanonicalLedgerGetAdapter()
+    loop = RuntimeLoop(eventlog=log, adapter=adapter, autonomy=False)
+
+    loop.run_turn("show me event 1")
+
+    events = log.read_all()
+    reads = [e for e in events if e.get("kind") == "ledger_read"]
+    assert reads, "expected a ledger_read event"
+    payload = json.loads(reads[-1]["content"])
+    assert payload["ok"] is True
+    assert payload["id"] == 1
+    assert len(adapter.calls) == 2
+
+
+class CanonicalLedgerFindAdapter:
+    deterministic_latency_ms = 0
+    model = "test-canonical-ledger-find-adapter"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def generate_reply(self, system_prompt: str, user_prompt: str) -> str:
+        self.calls.append(user_prompt)
+        if len(self.calls) == 1:
+            return (
+                '{"tool":"ledger_find","arguments":{"query":"identity",'
+                '"kind":"claim","from_id":1,"to_id":1000,"limit":5}}'
+            )
+        return "Canonical find done.\nCOMMIT: ok"
+
+
+def test_runtime_loop_handles_canonical_json_ledger_find() -> None:
+    log = EventLog(":memory:")
+    log.append(kind="claim", content="identity coherence improved", meta={})
+    adapter = CanonicalLedgerFindAdapter()
+    loop = RuntimeLoop(eventlog=log, adapter=adapter, autonomy=False)
+
+    loop.run_turn("find identity claims")
+
+    events = log.read_all()
+    searches = [e for e in events if e.get("kind") == "ledger_search"]
+    assert searches, "expected a ledger_search event"
+    payload = json.loads(searches[-1]["content"])
+    assert payload["ok"] is True
+    assert payload["entries"], "expected at least one result"
+    assert len(adapter.calls) == 2
+
+
+class MalformedToolAttemptAdapter:
+    deterministic_latency_ms = 0
+    model = "test-malformed-tool-attempt-adapter"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def generate_reply(self, system_prompt: str, user_prompt: str) -> str:
+        self.calls.append(user_prompt)
+        if len(self.calls) == 1:
+            return (
+                "[TOOL_CALL]\n"
+                '{tool => "LEDGER_GET", args => {\n'
+                "  --event_id 1\n"
+                "}}\n"
+                "[/TOOL_CALL]"
+            )
+        return "retry-ready"
+
+
+def test_runtime_loop_reprompts_on_malformed_tool_attempt() -> None:
+    log = EventLog(":memory:")
+    adapter = MalformedToolAttemptAdapter()
+    loop = RuntimeLoop(eventlog=log, adapter=adapter, autonomy=False)
+
+    loop.run_turn("show me event 1")
+
+    events = log.read_all()
+    reads = [e for e in events if e.get("kind") == "ledger_read"]
+    assert not reads, "expected malformed tool call to avoid ledger_read"
+    assert len(adapter.calls) == 2
+    assert "[TOOL_PROTOCOL_ERROR]" in adapter.calls[-1]

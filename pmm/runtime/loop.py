@@ -320,6 +320,75 @@ class RuntimeLoop:
             pass
         return None
 
+    def _extract_canonical_tool_call(
+        self, text: str
+    ) -> tuple[str, Dict[str, Any]] | None:
+        """Parse preferred canonical tool format:
+        {"tool":"ledger_find","arguments":{...}}
+        """
+        body = (text or "").strip()
+        if not body:
+            return None
+        candidates: List[str] = [body]
+        # Also inspect individual lines in case tool JSON is line-scoped.
+        candidates.extend([(ln or "").strip() for ln in body.splitlines() if ln.strip()])
+        tool_map = {
+            "web_search": "WEB",
+            "web": "WEB",
+            "ledger_get": "LEDGER_GET",
+            "ledger_find": "LEDGER_FIND",
+        }
+        for candidate in candidates:
+            if '"tool"' not in candidate and "'tool'" not in candidate:
+                continue
+            try:
+                parsed = json.loads(candidate)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            tool_raw = str(parsed.get("tool") or "").strip().lower()
+            args = parsed.get("arguments")
+            if not tool_raw or not isinstance(args, dict):
+                continue
+            mapped = tool_map.get(tool_raw)
+            if mapped:
+                return (mapped, args)
+        return None
+
+    def _extract_tool_request(
+        self, text: str
+    ) -> tuple[str, Dict[str, Any]] | None:
+        # Preferred canonical format first.
+        canonical = self._extract_canonical_tool_call(text)
+        if canonical:
+            return canonical
+        web = self._extract_web_request(text)
+        if web:
+            return ("WEB", web)
+        ledger_get = self._extract_ledger_get_request(text)
+        if ledger_get:
+            return ("LEDGER_GET", ledger_get)
+        ledger_find = self._extract_ledger_find_request(text)
+        if ledger_find:
+            return ("LEDGER_FIND", ledger_find)
+        return None
+
+    def _looks_like_tool_attempt(self, text: str) -> bool:
+        body = text or ""
+        if not body.strip():
+            return False
+        hints = (
+            "WEB:",
+            "LEDGER_GET:",
+            "LEDGER_FIND:",
+            "[TOOL_CALL]",
+            "<invoke name=",
+            '"tool"',
+            "{tool =>",
+        )
+        return any(h in body for h in hints)
+
     def _extract_claims(self, text: str) -> List[Claim]:
         lines = (text or "").splitlines()
         try:
@@ -571,88 +640,103 @@ class RuntimeLoop:
         )
         t1 = time.perf_counter()
 
-        # 3a. Optional web search tool call (single pass).
-        web_request = self._extract_web_request(assistant_reply)
-        if web_request:
-            from pmm.runtime.web_search import run_web_search
+        # 3a. Optional tool calls (bounded multi-pass, canonical JSON first).
+        max_tool_rounds = 4
+        tool_parse_errors = 0
+        tool_rounds = 0
+        for _ in range(max_tool_rounds):
+            tool_request = self._extract_tool_request(assistant_reply)
+            if tool_request is None:
+                # The model appears to be attempting a tool call, but format is malformed.
+                # Give one deterministic protocol correction chance instead of hanging.
+                if self._looks_like_tool_attempt(assistant_reply):
+                    tool_parse_errors += 1
+                    tool_rounds += 1
+                    effective_user_prompt = (
+                        f"{effective_user_prompt}\n\n[TOOL_PROTOCOL_ERROR]\n"
+                        "Tool call parse failed. Use exactly one tool call in one of these formats:\n"
+                        '{"tool":"ledger_get","arguments":{"id":123}}\n'
+                        '{"tool":"ledger_find","arguments":{"query":"...","from_id":1,"to_id":1000,"limit":20}}\n'
+                        '{"tool":"web_search","arguments":{"query":"...","provider":"brave","limit":5}}\n'
+                        "Or legacy markers at column 0: LEDGER_GET:/LEDGER_FIND:/WEB:"
+                    )
+                    assistant_reply = self.adapter.generate_reply(
+                        system_prompt=system_prompt, user_prompt=effective_user_prompt
+                    )
+                    t1 = time.perf_counter()
+                    continue
+                break
 
-            tool_names_used.append("WEB")
-            query = str(web_request.get("query") or "").strip()
-            provider = web_request.get("provider")
-            limit = web_request.get("limit", 5)
-            tool_payload = run_web_search(query, provider=provider, limit=limit)
-            self.eventlog.append(
-                kind="web_search",
-                content=json.dumps(tool_payload, sort_keys=True, separators=(",", ":")),
-                meta={"source": "assistant", "trigger": "marker"},
-            )
-            effective_user_prompt = (
-                f"{user_input}\n\n[WEB_SEARCH_RESULTS]\n"
-                f"{json.dumps(tool_payload, sort_keys=True, separators=(',', ':'))}"
-            )
-            assistant_reply = self.adapter.generate_reply(
-                system_prompt=system_prompt, user_prompt=effective_user_prompt
-            )
-            t1 = time.perf_counter()
+            tool_name, args = tool_request
+            tool_names_used.append(tool_name)
+            tool_rounds += 1
+            if tool_name == "WEB":
+                from pmm.runtime.web_search import run_web_search
 
-        # 3b. Optional ledger event lookup (single pass).
-        ledger_request = self._extract_ledger_get_request(assistant_reply)
-        if ledger_request:
-            from pmm.runtime.ledger_reader import run_ledger_get
+                query = str(args.get("query") or "").strip()
+                provider = args.get("provider")
+                limit = args.get("limit", 5)
+                tool_payload = run_web_search(query, provider=provider, limit=limit)
+                self.eventlog.append(
+                    kind="web_search",
+                    content=json.dumps(tool_payload, sort_keys=True, separators=(",", ":")),
+                    meta={"source": "assistant", "trigger": "marker", "request": args},
+                )
+                effective_user_prompt = (
+                    f"{effective_user_prompt}\n\n[WEB_SEARCH_RESULTS]\n"
+                    f"{json.dumps(tool_payload, sort_keys=True, separators=(',', ':'))}"
+                )
+            elif tool_name == "LEDGER_GET":
+                from pmm.runtime.ledger_reader import run_ledger_get
 
-            tool_names_used.append("LEDGER_GET")
-            event_id = ledger_request.get("id")
-            include_meta = bool(ledger_request.get("include_meta", True))
-            max_content_chars = ledger_request.get("max_content_chars", 4000)
-            tool_payload = run_ledger_get(
-                self.eventlog,
-                event_id=event_id,
-                include_meta=include_meta,
-                max_content_chars=max_content_chars,
-            )
-            self.eventlog.append(
-                kind="ledger_read",
-                content=json.dumps(tool_payload, sort_keys=True, separators=(",", ":")),
-                meta={"source": "assistant", "trigger": "marker", "request": ledger_request},
-            )
-            effective_user_prompt = (
-                f"{effective_user_prompt}\n\n[LEDGER_GET_RESULTS]\n"
-                f"{json.dumps(tool_payload, sort_keys=True, separators=(',', ':'))}"
-            )
-            assistant_reply = self.adapter.generate_reply(
-                system_prompt=system_prompt, user_prompt=effective_user_prompt
-            )
-            t1 = time.perf_counter()
+                event_id = args.get("id")
+                include_meta = bool(args.get("include_meta", True))
+                max_content_chars = args.get("max_content_chars", 4000)
+                tool_payload = run_ledger_get(
+                    self.eventlog,
+                    event_id=event_id,
+                    include_meta=include_meta,
+                    max_content_chars=max_content_chars,
+                )
+                self.eventlog.append(
+                    kind="ledger_read",
+                    content=json.dumps(tool_payload, sort_keys=True, separators=(",", ":")),
+                    meta={"source": "assistant", "trigger": "marker", "request": args},
+                )
+                effective_user_prompt = (
+                    f"{effective_user_prompt}\n\n[LEDGER_GET_RESULTS]\n"
+                    f"{json.dumps(tool_payload, sort_keys=True, separators=(',', ':'))}"
+                )
+            elif tool_name == "LEDGER_FIND":
+                from pmm.runtime.ledger_reader import run_ledger_find
 
-        # 3c. Optional ledger search lookup (single pass).
-        ledger_find_request = self._extract_ledger_find_request(assistant_reply)
-        if ledger_find_request:
-            from pmm.runtime.ledger_reader import run_ledger_find
+                tool_payload = run_ledger_find(
+                    self.eventlog,
+                    query=args.get("query"),
+                    kind=args.get("kind"),
+                    from_id=args.get("from_id"),
+                    to_id=args.get("to_id"),
+                    limit=args.get("limit", 20),
+                    include_meta=bool(args.get("include_meta", True)),
+                    max_content_chars=args.get("max_content_chars", 2000),
+                )
+                self.eventlog.append(
+                    kind="ledger_search",
+                    content=json.dumps(tool_payload, sort_keys=True, separators=(",", ":")),
+                    meta={"source": "assistant", "trigger": "marker", "request": args},
+                )
+                effective_user_prompt = (
+                    f"{effective_user_prompt}\n\n[LEDGER_FIND_RESULTS]\n"
+                    f"{json.dumps(tool_payload, sort_keys=True, separators=(',', ':'))}"
+                )
+            else:
+                # Unknown tool alias: ask model to retry with supported names.
+                tool_parse_errors += 1
+                effective_user_prompt = (
+                    f"{effective_user_prompt}\n\n[TOOL_PROTOCOL_ERROR]\n"
+                    f"Unsupported tool '{tool_name}'. Supported: web_search, ledger_get, ledger_find."
+                )
 
-            tool_names_used.append("LEDGER_FIND")
-            tool_payload = run_ledger_find(
-                self.eventlog,
-                query=ledger_find_request.get("query"),
-                kind=ledger_find_request.get("kind"),
-                from_id=ledger_find_request.get("from_id"),
-                to_id=ledger_find_request.get("to_id"),
-                limit=ledger_find_request.get("limit", 20),
-                include_meta=bool(ledger_find_request.get("include_meta", True)),
-                max_content_chars=ledger_find_request.get("max_content_chars", 2000),
-            )
-            self.eventlog.append(
-                kind="ledger_search",
-                content=json.dumps(tool_payload, sort_keys=True, separators=(",", ":")),
-                meta={
-                    "source": "assistant",
-                    "trigger": "marker",
-                    "request": ledger_find_request,
-                },
-            )
-            effective_user_prompt = (
-                f"{effective_user_prompt}\n\n[LEDGER_FIND_RESULTS]\n"
-                f"{json.dumps(tool_payload, sort_keys=True, separators=(',', ':'))}"
-            )
             assistant_reply = self.adapter.generate_reply(
                 system_prompt=system_prompt, user_prompt=effective_user_prompt
             )
@@ -830,6 +914,8 @@ class RuntimeLoop:
                 "tool_hint_shown": tool_hint_shown,
                 "tool_called": bool(tool_names_unique),
                 "tool_name": ",".join(tool_names_unique),
+                "tool_rounds": tool_rounds,
+                "tool_parse_errors": tool_parse_errors,
             },
         )
 
