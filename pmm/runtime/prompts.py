@@ -76,6 +76,14 @@ MARKER_INSTRUCTIONS = (
     "  {\"cid\": \"abc123\", \"actual_outcome\": \"What happened\", \"criteria_met\": {\"criterion1\": true, \"criterion2\": false}}"
 )
 
+TOOL_CATALOG = (
+    "Tool catalog (use only when needed):\n"
+    '- WEB: {"query":"...","provider":"brave","limit":5}\n'
+    '- LEDGER_GET: {"id":123}\n'
+    '- LEDGER_FIND: {"query":"...","kind":"claim","from_id":1,"to_id":1000,"limit":20}\n'
+    "After tool results arrive, finish with plain-English prose."
+)
+
 JSON_HEADER_GUIDANCE = (
     "Structured header (optional, for CTL/ConceptGraph indexing):\n"
     "Emit a single JSON object **only** when the turn involves identity shifts, "
@@ -134,6 +142,7 @@ def compose_system_prompt(
             )
 
     # ── Mechanical scaffolding (must be present for the runtime) ─────────
+    parts.append(TOOL_CATALOG)
     parts.append(MARKER_INSTRUCTIONS)
     parts.append(
         "Write a rich, natural-language response to the user first. "

@@ -159,7 +159,8 @@ class RuntimeLoop:
         return extract_reflect(lines)
 
     def _extract_web_request(self, text: str) -> Dict[str, Any] | None:
-        lines = (text or "").splitlines()
+        body = text or ""
+        lines = body.splitlines()
         for ln in lines:
             stripped = (ln or "").strip()
             if not stripped.startswith("WEB:"):
@@ -173,6 +174,30 @@ class RuntimeLoop:
                     return parsed
             except json.JSONDecodeError:
                 return {"query": payload}
+        # Bracket tool-call dialect:
+        # [TOOL_CALL]
+        # {tool => "WEB", args => { --query "..." --provider brave --limit 5 }}
+        # [/TOOL_CALL]
+        if 'tool => "WEB"' in body:
+            req: Dict[str, Any] = {}
+            for key in ("query", "provider", "limit"):
+                match = re.search(
+                    rf"--{key}\s+([^\n\r\}}]+)",
+                    body,
+                    flags=re.DOTALL,
+                )
+                if not match:
+                    continue
+                raw_val = match.group(1).strip().strip('"').strip("'")
+                if key == "limit":
+                    try:
+                        req[key] = int(raw_val)
+                    except ValueError:
+                        req[key] = raw_val
+                else:
+                    req[key] = raw_val
+            if req:
+                return req
         return None
 
     def _extract_ledger_get_request(self, text: str) -> Dict[str, Any] | None:
@@ -208,6 +233,17 @@ class RuntimeLoop:
                     return {"id": int(raw_id)}
                 except ValueError:
                     return {"id": raw_id}
+        # Bracket tool-call dialect:
+        # [TOOL_CALL]
+        # {tool => "LEDGER_GET", args => { --id 123 }}
+        # [/TOOL_CALL]
+        if 'tool => "LEDGER_GET"' in body:
+            match = re.search(r"--id\s+([0-9]+)", body, flags=re.DOTALL)
+            if match:
+                try:
+                    return {"id": int(match.group(1))}
+                except ValueError:
+                    pass
         return None
 
     def _extract_ledger_find_request(self, text: str) -> Dict[str, Any] | None:
@@ -247,6 +283,27 @@ class RuntimeLoop:
                     req[key] = raw_val
             if req:
                 return req
+        # Bracket tool-call dialect with flag-style args.
+        if 'tool => "LEDGER_FIND"' in body:
+            req2: Dict[str, Any] = {}
+            for key in ("query", "kind", "from_id", "to_id", "limit"):
+                match = re.search(
+                    rf"--{key}\s+([^\n\r\}}]+)",
+                    body,
+                    flags=re.DOTALL,
+                )
+                if not match:
+                    continue
+                raw_val = match.group(1).strip().strip('"').strip("'")
+                if key in ("from_id", "to_id", "limit"):
+                    try:
+                        req2[key] = int(raw_val)
+                    except ValueError:
+                        req2[key] = raw_val
+                else:
+                    req2[key] = raw_val
+            if req2:
+                return req2
 
         # Fallback: bare JSON object in model output (no marker prefix).
         # Accept only if it looks like a ledger-find payload to avoid
@@ -271,6 +328,31 @@ class RuntimeLoop:
             # Keep runtime robust: skip malformed claim lines
             parsed = []
         return [Claim(type=ctype, data=data) for ctype, data in parsed]
+
+    @staticmethod
+    def _needs_tool_hint(user_input: str) -> bool:
+        text = (user_input or "").lower()
+        if not text:
+            return False
+        cue_tokens = (
+            "ledger",
+            "event ",
+            "events ",
+            "id ",
+            "ids ",
+            "range",
+            "between",
+            "what's in",
+            "whats in",
+            "inspect",
+            "search",
+            "find",
+            "look up",
+            "lookup",
+        )
+        if any(tok in text for tok in cue_tokens):
+            return True
+        return bool(re.search(r"\b\d+\s*\.\.\s*\d+\b", text))
 
     def _get_temporal_context(self) -> Optional[str]:
         """Get temporal context to inject into system prompts."""
@@ -473,7 +555,17 @@ class RuntimeLoop:
 
         # 3. Invoke model
         t0 = time.perf_counter()
-        effective_user_prompt = user_input
+        tool_hint_shown = False
+        if self._needs_tool_hint(user_input):
+            effective_user_prompt = (
+                f"{user_input}\n\n[TOOL_HINT]\n"
+                "If evidence is needed, use WEB/LEDGER_GET/LEDGER_FIND markers first, "
+                "then provide a plain-English final answer."
+            )
+            tool_hint_shown = True
+        else:
+            effective_user_prompt = user_input
+        tool_names_used: List[str] = []
         assistant_reply = self.adapter.generate_reply(
             system_prompt=system_prompt, user_prompt=effective_user_prompt
         )
@@ -484,6 +576,7 @@ class RuntimeLoop:
         if web_request:
             from pmm.runtime.web_search import run_web_search
 
+            tool_names_used.append("WEB")
             query = str(web_request.get("query") or "").strip()
             provider = web_request.get("provider")
             limit = web_request.get("limit", 5)
@@ -507,6 +600,7 @@ class RuntimeLoop:
         if ledger_request:
             from pmm.runtime.ledger_reader import run_ledger_get
 
+            tool_names_used.append("LEDGER_GET")
             event_id = ledger_request.get("id")
             include_meta = bool(ledger_request.get("include_meta", True))
             max_content_chars = ledger_request.get("max_content_chars", 4000)
@@ -535,6 +629,7 @@ class RuntimeLoop:
         if ledger_find_request:
             from pmm.runtime.ledger_reader import run_ledger_find
 
+            tool_names_used.append("LEDGER_FIND")
             tool_payload = run_ledger_find(
                 self.eventlog,
                 query=ledger_find_request.get("query"),
@@ -727,7 +822,16 @@ class RuntimeLoop:
             f"provider:{prov},model:{model_name},"
             f"in_tokens:{in_tokens},out_tokens:{out_tokens},lat_ms:{lat_ms}"
         )
-        self.eventlog.append(kind="metrics_turn", content=diag, meta={})
+        tool_names_unique = sorted(set(tool_names_used))
+        self.eventlog.append(
+            kind="metrics_turn",
+            content=diag,
+            meta={
+                "tool_hint_shown": tool_hint_shown,
+                "tool_called": bool(tool_names_unique),
+                "tool_name": ",".join(tool_names_unique),
+            },
+        )
 
         # 4d. Synthesize deterministic reflection and maybe append summary
         synthesize_reflection(self.eventlog, mirror=self.mirror)
