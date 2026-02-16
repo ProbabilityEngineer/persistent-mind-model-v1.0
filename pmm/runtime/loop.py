@@ -755,6 +755,7 @@ class RuntimeLoop:
         selection_ids = retrieval_result.event_ids
         # We don't calculate vector scores in pipeline result yet, so pass empty/dummy
         selection_scores = [0.0] * len(selection_ids)
+        selection_reasons = retrieval_result.ranking_reasons or {}
 
         # Check if graph context is actually present
         context_has_graph = "## Graph" in ctx_block
@@ -1089,6 +1090,10 @@ class RuntimeLoop:
                     "turn_id": ai_event_id,
                     "selected": selection_ids,
                     "scores": selection_scores,
+                    "reasons": {
+                        str(eid): selection_reasons.get(eid, {})
+                        for eid in selection_ids[:20]
+                    },
                     "strategy": "vector",
                     "model": model,
                     "dims": dims,

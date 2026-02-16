@@ -62,6 +62,9 @@ def test_retrieval_selection_recorded_and_consistent():
     selected_ids = payload.get("selected") or []
     scores = payload.get("scores") or []
     assert selected_ids and len(selected_ids) == len(scores)
+    reasons = payload.get("reasons") or {}
+    assert isinstance(reasons, dict)
+    assert str(selected_ids[0]) in reasons
 
     # Deterministically recompute (up to the assistant turn id) and confirm identical ids
     turn_id = int(payload.get("turn_id"))
