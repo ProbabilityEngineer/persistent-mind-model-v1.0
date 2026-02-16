@@ -66,8 +66,22 @@ class EventLog:
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_hash ON events(hash);"
             )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS event_chunks (
+                    event_id INTEGER NOT NULL,
+                    chunk_idx INTEGER NOT NULL,
+                    chunk_text TEXT NOT NULL,
+                    PRIMARY KEY (event_id, chunk_idx)
+                );
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_event_chunks_event ON event_chunks(event_id);"
+            )
             self._init_fts()
             self._backfill_fts()
+            self._backfill_chunks()
 
     @staticmethod
     def _row_to_event(row: sqlite3.Row) -> Dict[str, Any]:
@@ -91,6 +105,17 @@ class EventLog:
                     content,
                     meta_text,
                     kind UNINDEXED,
+                    tokenize='unicode61'
+                );
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS events_chunks_fts
+                USING fts5(
+                    event_id UNINDEXED,
+                    chunk_idx UNINDEXED,
+                    chunk_text,
                     tokenize='unicode61'
                 );
                 """
@@ -132,6 +157,66 @@ class EventLog:
                     ),
                 )
 
+    @staticmethod
+    def _split_content_chunks(
+        content: str, *, chunk_size: int = 320, overlap: int = 64
+    ) -> List[str]:
+        text = str(content or "")
+        if not text:
+            return []
+        if len(text) <= chunk_size:
+            return [text]
+
+        chunks: List[str] = []
+        start = 0
+        step = max(1, chunk_size - overlap)
+        while start < len(text):
+            end = min(len(text), start + chunk_size)
+            chunk = text[start:end]
+            chunks.append(chunk)
+            if end >= len(text):
+                break
+            start += step
+        return chunks
+
+    @staticmethod
+    def _snippet_around_query(text: str, query: str, max_chars: int) -> str:
+        src = str(text or "")
+        q = str(query or "").strip()
+        if not src:
+            return ""
+        if not q:
+            return src[:max_chars]
+        low = src.lower()
+        qlow = q.lower()
+        at = low.find(qlow)
+        if at < 0:
+            return src[:max_chars]
+        left = max(0, at - (max_chars // 3))
+        right = min(len(src), left + max_chars)
+        return src[left:right]
+
+    def _backfill_chunks(self, batch_size: int = 500) -> None:
+        while True:
+            cur = self._conn.execute(
+                """
+                SELECT e.id, e.content
+                FROM events e
+                LEFT JOIN event_chunks c ON c.event_id = e.id
+                WHERE c.event_id IS NULL
+                ORDER BY e.id ASC
+                LIMIT ?
+                """,
+                (int(batch_size),),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                break
+            for row in rows:
+                self._index_chunks_for_event(
+                    int(row["id"]), str(row["content"] or ""), replace=False
+                )
+
     def _index_event_for_search(
         self, event_id: int, kind: str, content: str, meta: Dict[str, Any]
     ) -> None:
@@ -145,6 +230,36 @@ class EventLog:
             """,
             (int(event_id), str(content or ""), meta_text, str(kind or "")),
         )
+        self._index_chunks_for_event(int(event_id), str(content or ""), replace=True)
+
+    def _index_chunks_for_event(self, event_id: int, content: str, replace: bool) -> None:
+        chunks = self._split_content_chunks(content)
+        if replace:
+            self._conn.execute(
+                "DELETE FROM event_chunks WHERE event_id = ?",
+                (int(event_id),),
+            )
+            if self._fts_enabled:
+                self._conn.execute(
+                    "DELETE FROM events_chunks_fts WHERE event_id = ?",
+                    (str(int(event_id)),),
+                )
+        for idx, chunk_text in enumerate(chunks):
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO event_chunks(event_id, chunk_idx, chunk_text)
+                VALUES (?, ?, ?)
+                """,
+                (int(event_id), int(idx), str(chunk_text)),
+            )
+            if self._fts_enabled:
+                self._conn.execute(
+                    """
+                    INSERT INTO events_chunks_fts(event_id, chunk_idx, chunk_text)
+                    VALUES (?, ?, ?)
+                    """,
+                    (str(int(event_id)), str(int(idx)), str(chunk_text)),
+                )
 
     def register_listener(self, callback) -> None:
         """Register a callback(event_dict) when an event is appended."""
@@ -626,6 +741,98 @@ class EventLog:
             )
             cur = self._conn.execute(sql, [*params, lim])
             return [self._row_to_event(row) for row in cur.fetchall()]
+
+    def find_matching_chunks(
+        self,
+        *,
+        query: str,
+        kind: Optional[str] = None,
+        start_id: Optional[int] = None,
+        end_id: Optional[int] = None,
+        limit: int = 20,
+        snippet_chars: int = 180,
+    ) -> List[Dict[str, Any]]:
+        """Return chunk-level keyword matches with parent event IDs."""
+        q = (query or "").strip()
+        if not q:
+            return []
+        lim = max(1, min(int(limit), 100))
+        snip = max(40, int(snippet_chars))
+        kind_val = (kind or "").strip()
+
+        where_clauses: List[str] = []
+        params: List[Any] = []
+        if kind_val:
+            where_clauses.append("e.kind = ?")
+            params.append(kind_val)
+        if start_id is not None:
+            where_clauses.append("e.id >= ?")
+            params.append(int(start_id))
+        if end_id is not None:
+            where_clauses.append("e.id <= ?")
+            params.append(int(end_id))
+        where_sql = ""
+        if where_clauses:
+            where_sql = " AND " + " AND ".join(where_clauses)
+
+        with self._lock:
+            rows: List[sqlite3.Row] = []
+            if self._fts_enabled:
+                sql = (
+                    "SELECT c.event_id, c.chunk_idx, c.chunk_text, e.kind "
+                    "FROM events_chunks_fts c "
+                    "JOIN events e ON e.id = CAST(c.event_id AS INTEGER) "
+                    "WHERE events_chunks_fts MATCH ?"
+                    f"{where_sql} "
+                    "ORDER BY e.id DESC, CAST(c.chunk_idx AS INTEGER) ASC LIMIT ?"
+                )
+                try:
+                    cur = self._conn.execute(sql, [q, *params, lim])
+                    rows = cur.fetchall()
+                except sqlite3.Error:
+                    rows = []
+
+            if not rows:
+                # Fallback path without FTS.
+                like = q.lower()
+                sql = (
+                    "SELECT e.id, e.kind, e.content FROM events e WHERE 1=1"
+                    f"{where_sql} ORDER BY e.id DESC LIMIT ?"
+                )
+                cur = self._conn.execute(sql, [*params, max(lim * 3, lim)])
+                fallback_rows = cur.fetchall()
+                out: List[Dict[str, Any]] = []
+                for row in fallback_rows:
+                    event_id = int(row["id"])
+                    chunks = self._split_content_chunks(str(row["content"] or ""))
+                    for idx, chunk_text in enumerate(chunks):
+                        if like in chunk_text.lower():
+                            out.append(
+                                {
+                                    "event_id": event_id,
+                                    "kind": str(row["kind"] or ""),
+                                    "chunk_idx": idx,
+                                    "snippet": self._snippet_around_query(
+                                        chunk_text, q, snip
+                                    ),
+                                }
+                            )
+                            if len(out) >= lim:
+                                return out
+                return out
+
+            out2: List[Dict[str, Any]] = []
+            for row in rows:
+                chunk_text = str(row["chunk_text"] or "")
+                out2.append(
+                    {
+                        "event_id": int(row["event_id"]),
+                        "kind": str(row["kind"] or ""),
+                        "chunk_idx": int(row["chunk_idx"]),
+                        "snippet": self._snippet_around_query(chunk_text, q, snip),
+                    }
+                )
+            return out2
 
     def has_exec_bind(self, cid: str) -> bool:
         cid = (cid or "").strip()

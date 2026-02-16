@@ -42,3 +42,33 @@ def test_find_entries_backfills_fts_on_reopen(tmp_path: Path) -> None:
     results = reopened.find_entries(query="backfill", kind="claim", limit=5)
     assert results
     assert results[0]["content"] == "backfill identity token"
+
+
+def test_find_matching_chunks_returns_parent_event_and_snippet() -> None:
+    log = EventLog(":memory:")
+    long_text = (
+        "intro " * 80
+        + "special_token_echidna appears in the middle of a long event body "
+        + "tail " * 80
+    )
+    eid = log.append(kind="assistant_message", content=long_text, meta={})
+
+    hits = log.find_matching_chunks(query="special_token_echidna", limit=10)
+    assert hits
+    assert any(int(h["event_id"]) == eid for h in hits)
+    assert any("special_token_echidna" in h["snippet"] for h in hits)
+
+
+def test_find_matching_chunks_backfills_on_reopen(tmp_path: Path) -> None:
+    db_path = tmp_path / "chunk_backfill.db"
+    log = EventLog(str(db_path))
+    log.append(
+        kind="assistant_message",
+        content=("prefix " * 60) + "rare_chunk_phrase" + (" suffix" * 60),
+        meta={},
+    )
+
+    reopened = EventLog(str(db_path))
+    hits = reopened.find_matching_chunks(query="rare_chunk_phrase", limit=5)
+    assert hits
+    assert int(hits[0]["event_id"]) >= 1

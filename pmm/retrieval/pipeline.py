@@ -221,6 +221,23 @@ def run_retrieval_pipeline(
     keyword_event_scores: Dict[int, float] = {}
 
     if config.enable_hybrid_scoring and query_text.strip():
+        chunk_hits = eventlog.find_matching_chunks(
+            query=query_text.strip(),
+            limit=min(max(1, int(config.vector_candidate_cap)), 100),
+        )
+        chunk_counts: Dict[int, int] = {}
+        for hit in chunk_hits:
+            try:
+                eid = int(hit.get("event_id", 0))
+            except Exception:
+                continue
+            if eid <= 0:
+                continue
+            chunk_counts[eid] = chunk_counts.get(eid, 0) + 1
+        for eid, count in chunk_counts.items():
+            # Base keyword weight with a small bonus for multiple matched chunks.
+            keyword_event_scores[eid] = min(1.5, 1.0 + 0.1 * max(0, count - 1))
+
         keyword_hits = eventlog.find_entries(
             query=query_text.strip(),
             limit=min(max(1, int(config.vector_candidate_cap)), 50),
@@ -231,7 +248,7 @@ def run_retrieval_pipeline(
             except Exception:
                 continue
             if eid > 0:
-                keyword_event_scores[eid] = 1.0
+                keyword_event_scores[eid] = max(keyword_event_scores.get(eid, 0.0), 1.0)
 
     # Vector stage becomes a refiner over already selected slices only
     def _refine_with_vector(
